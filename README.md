@@ -1,111 +1,142 @@
-# Bannerlord TPAC 批量迁移工具
+# MB-BannerLord-TpacTransferTool
 
-把《骑马与砍杀 II：霸主》mod 里的 `.tpac` 资源包批量迁移到另一个 mod 包目录，
-自动重映射包内**被锁死的资源路径引用**，解决逐个手动搬运导致的路径失效、模型无法识别。
+**English** | [中文](README.md)
 
-## 它到底解决了什么
+Batch-migrate `.tpac` asset packages from one *Mount & Blade II: Bannerlord* mod to another,
+automatically **re-mapping the hard-coded asset paths locked inside the packages** — so moved
+meshes and textures are still found by the game instead of silently failing to load.
 
-`.tpac` 是 TaleWorlds 的资源容器。资源在打包时会把源路径写进包里，例如：
+## The problem it solves
+
+`.tpac` is TaleWorlds' asset container format. When assets are packed, the source path is baked
+into the package, for example:
 
 ```
 $BASE/Modules/MercenaryVariety/AssetSources/rome_items/mv_armor_coat.fbx
 ```
 
-这条路径是**随包一起搬走**的。把 tpac 复制到别的 mod 之后，包内仍然指向原来那个模块，
-这就是"换个 mod 包就失效"的根源。
+That path **travels with the package**. Copy a `.tpac` into a different mod and it still points at
+the original module — which is exactly why "just move the file" breaks the model.
 
-本工具会解析容器，把这些引用按规则改写成新模块的路径：
+This tool parses the container and rewrites those references to the new module's path:
 
 ```
-$BASE/Modules/MercenaryVariety/  ->  $BASE/Modules/目标模块/
+$BASE/Modules/MercenaryVariety/  ->  $BASE/Modules/<target module>/
 ```
 
-同时它会扫描包内资源之间的 **GUID 依赖**（材质 → 纹理、网格 → 材质都是 GUID 引用，不是路径），
-报告哪些依赖指向了包外，让你知道迁移后还缺什么。
+It also scans the **GUID dependencies** between assets inside the package (material → texture and
+mesh → material are GUID references, not paths) and reports which ones point outside the package,
+so you know what else must come along.
 
-## 使用方法
+## Requirements
 
-### 图形界面（推荐）
+- Windows (the launcher script and the GUI are Windows-oriented; the CLI is plain Python).
+- Python 3.8+ — tested on 3.11.
+- The **GUI requires a Python build that includes `tkinter`** (the official python.org builds do;
+  some minimal/embedded builds and the Microsoft Store build do not).
+- **No third-party packages are required.** The LZ4 block codec is implemented in pure Python.
+  If `lz4` happens to be installed, it is used for faster re-compression, but it is optional.
 
-双击 **`启动迁移工具.bat`**，或命令行执行 `python migrator_gui.py`。
+## Getting started
 
-1. **源与目标**：添加要迁移的 mod 目录（或单个 `.tpac` 文件），再选目标模块目录。
-   点「查找游戏目录…」可以直接从 `Modules` 里挑一个模块。
-   - 目标模块名会自动从目录名推断，它决定替换成什么样的路径。
-2. **扫描源**：列出所有 tpac、条目数、内容构成、包外依赖数量。默认全选，点首列可勾选。
-3. **路径重映射规则**：扫描完成后会**依据包内真实出现的路径**自动建议规则（不是猜的）。
-   可以手工增删改。
-4. **选项**：建议保持「覆盖前备份」和「写盘后结构自检」开启。
-5. **开始迁移**：先用「预演（只看不改）」确认目标路径，再正式执行。
+### Option A — prebuilt executable
 
-出问题时用「回滚上次迁移」撤销——它会删除本次写入的文件，还原被覆盖前的备份。
+Run the bundled `霸主tpac迁移工具.exe` (Bannerlord tpac Migration Tool) — no Python required.
+Double-click it and the GUI opens.
 
-### 命令行
+### Option B — from source
+
+```bat
+:: GUI (recommended)
+启动迁移工具.bat
+:: -- or --
+python migrator_gui.py
+
+:: Command line
+python migrator.py --source "E:\...\Modules\MercenaryVariety\Assets" ^
+                   --target "E:\...\Modules\MyMod" --to MyMod
+```
+
+## Usage
+
+### GUI (recommended)
+
+1. **Source & target** — add the mod directory (or individual `.tpac` files) to migrate, then pick
+   the target module directory. *Find game directory…* lets you pick a module straight from
+   `Modules\`.
+   - The target module name is inferred from the directory name; it determines what the paths are
+     rewritten to.
+2. **Scan** — lists every `.tpac`, its item count, content breakdown and number of external
+   dependencies. All rows are selected by default; use the first column to toggle.
+3. **Path re-mapping rules** — after scanning, rules are **suggested from the paths that actually
+   occur inside the packages** (not guessed). You can add, edit or delete them by hand.
+4. **Options** — it is recommended to keep *back up before overwrite* and *verify structure after
+   writing* enabled.
+5. **Start migration** — use *Dry run (preview only)* to confirm the destination paths first, then
+   run it for real.
+
+If something goes wrong, use *Roll back last migration*: it deletes the files this run wrote and
+restores the pre-overwrite backups.
+
+### Command line
 
 ```bat
 python migrator.py --source "E:\...\Modules\MercenaryVariety\Assets" ^
                    --target "E:\...\Modules\MyMod" --to MyMod
 ```
 
-常用参数：`--from <源模块名>`、`--rule "旧串=新串"`、`--on-conflict rename|overwrite|skip`、
-`--dry-run`、`--no-backup`、`--flat`（不保留相对目录）、`--rollback`（撤销上次迁移）、
-`--lang zh|en`。
+Common flags: `--from <source module name>`, `--rule "old=new"`,
+`--on-conflict rename|overwrite|skip`, `--dry-run`, `--no-backup`,
+`--flat` (do not preserve relative directories), `--rollback` (undo the last migration),
+`--lang zh|en`.
 
-### 界面语言
+### Interface language
 
-右上角可切换 **中文 / English**，选择会存进 `ui_config.json`，下次启动自动沿用。
+The UI has a **中文 / English** switcher in the top-right corner; the choice is saved to
+`ui_config.json` and reused on the next launch.
 
-切换范围覆盖三层，不只是按钮文字：
+Translation covers three layers, not just button captions:
 
-- 界面控件、表头、弹窗
-- 迁移过程日志与警告
-- 解析 / 重建的报错信息
+- UI widgets, table headers and dialogs
+- Migration log lines and warnings
+- Parse / rebuild error messages
 
-命令行可单独指定：`python migrator_gui.py --lang en`、`python migrator.py --lang en`。
-首次运行没有记录时，按 Windows 界面语言自动选（中文系统默认中文）。
+The CLI can override it per run: `python migrator_gui.py --lang en`,
+`python migrator.py --lang en`. With no saved preference, the language is inferred from the
+Windows UI language.
 
-## 改写的安全策略
+## How rewriting stays safe
 
-tpac 是二进制容器，乱改长度会直接损坏文件。工具按保守程度分三档处理：
+A `.tpac` is a binary container — changing a length carelessly corrupts the file. The tool handles
+three cases, from most to least conservative:
 
-| 情况 | 做法 |
+| Case | What it does |
 |---|---|
-| 新旧字符串**等长** | 直接字节替换，不改变任何结构长度，零风险 |
-| 字符串**带 i32 长度前缀**（tpac 的通用写法） | 同步改写长度前缀，结构自洽，支持变长 |
-| 既不等长、又找不到长度前缀 | **跳过并明确报告**，绝不硬改 |
+| Old and new strings are **the same length** | Plain byte replacement, no structural length change, zero risk |
+| The string has an **i32 length prefix** (the usual tpac layout) | The length prefix is rewritten too, so the structure stays self-consistent and variable-length replacement works |
+| Neither equal-length **nor** length-prefixed | **Skipped and reported explicitly** — never force-written |
 
-因为整个容器是按条目重新生成的，改长改短都会自动重算 TOC 与数据区偏移。
+Because the whole container is regenerated item by item, any change in length automatically
+recomputes the TOC and data-region offsets.
 
-未改写的资源段会**连压缩字节一起原样搬运**，不做多余的解压/重压，
-改动面被压到最小，上百 MB 的包也能处理（分段流式读写，不会把整个文件读进内存）。
+Asset segments that are not rewritten are **copied verbatim together with their compressed bytes** —
+no needless decompress/recompress — keeping the change surface minimal. Packages hundreds of MB in
+size are fine: reading and writing are chunked and streaming, so the whole file is never loaded
+into memory.
 
-## 已验证
+## Verification
 
-格式实现经过真实文件校验，不是纸上推演：
+The format implementation is validated against real files, not just theory:
 
-- **字节级 round-trip**：解析 23 个真实 tpac（含 137 MB 的包）后原样重建，
-  与原始文件**逐字节完全一致**。这证明容器布局的理解没有偏差。
-- **迁移端到端**：真实迁移 40 个资源包，40/40 成功，产物可重新解析、条目数一致、
-  段数据可正常解压，路径已改写为目标模块。
-- **回滚**：撤销 40 个文件，全部清理干净。
+- **Byte-level round-trip** — 23 real `.tpac` packages (including a 137 MB one) were parsed and
+  rebuilt unchanged, **byte-for-byte identical** to the originals. This proves the container layout
+  is understood correctly.
+- **End-to-end migration** — 40 real packages migrated, 40/40 successful; the outputs re-parse,
+  keep the same item count, their segments still decompress, and the paths are rewritten to the
+  target module.
+- **Rollback** — all 40 written files were reverted cleanly.
 
-## 目录结构
-
-```
-霸主tpac迁移工具/
-  tpac_core.py       容器读写 / LZ4 / 依赖图 / 重映射引擎
-  migrator.py        迁移执行层（发现、规则建议、冲突、备份、回滚、命令行）
-  migrator_gui.py    图形界面（中英文切换）
-  i18n.py            中英文文案表（界面 / 日志 / 报错）
-  启动迁移工具.bat    一键启动
-  ui_config.json     记住的语言选择（首次运行后生成）
-  tests/
-    test_roundtrip.py  字节级 round-trip 校验
-    test_remap.py      真实文件迁移端到端校验
-    test_i18n.py       语言表自检（缺译 / 占位符不一致）
-```
-
-跑校验：
+Run the checks yourself:
 
 ```bat
 python tests\test_i18n.py
@@ -113,27 +144,70 @@ python tests\test_roundtrip.py
 python tests\test_remap.py
 ```
 
-## 注意
+> `test_roundtrip.py` and `test_remap.py` expect a local Bannerlord installation
+> (`E:\SteamLibrary\steamapps\common\Mount & Blade II Bannerlord` by default); adjust the path in
+> the script if yours differs.
 
-- 工具只改 tpac 内部的路径引用。**XML 里对资源的引用**（`ModuleData` 下的物品、兵种等）
-  不在 tpac 内，需要你自己同步改名，或让目标模块沿用原资源名。
-- 如果扫描报告出现「包外依赖 GUID」，说明这些资源引用了本包之外的东西。
-  目标环境必须同样能解析到它们，否则模型仍然显示不出来——这类依赖通常是材质/纹理
-  留在了源 mod 或原版里，需要一并迁移。
-- 迁移只会写目标目录，**不会改动源 mod**。但第一次批量操作前，仍然建议先备份目标模块。
-- 建议先拿几个不重要的包试一次，进游戏确认无误再批量跑。
-
-## 格式依据
-
-容器格式参考 TpacTool（szszss / hunharibo，MIT）的逆向结果，并在真实资源包上完成校验：
+## Project layout
 
 ```
-文件头 36B: magic "TPAC" | version | package guid | 条目数 | 数据区偏移 | 保留
-条目:      type guid | item guid | version | 名称(长度前缀) | metadata 长度 | metadata
-           | 校验和 | 段数 | 段[] | 依赖数 | 依赖[]
-段:        偏移 | 原始大小 | 存储大小 | owner guid | type guid | 未知×2 | 存储格式
-存储格式:  0 = 原始, 1 = LZ4-HC
+霸主tpac迁移工具/
+  tpac_core.py       container read/write, LZ4, dependency graph, re-mapping engine
+  migrator.py        migration layer (discovery, rule suggestions, conflicts, backup, rollback, CLI)
+  migrator_gui.py    graphical interface (zh/en switch)
+  i18n.py            zh/en message table (UI / log / errors)
+  启动迁移工具.bat    one-click launcher
+  ui_config.json     remembered language choice (created on first run)
+  tests/
+    test_roundtrip.py  byte-level round-trip check
+    test_remap.py      end-to-end migration check on real files
+    test_i18n.py       message-table check (missing translations / placeholder mismatch)
 ```
 
-工具自带纯 Python 的 LZ4 block 解码，无需安装任何第三方库；
-若环境里装了 `lz4`，重新压缩时会用它，装了更快、没装也能正常工作。
+### Building a standalone EXE
+
+With PyInstaller installed:
+
+```bat
+pyinstaller --noconfirm --onefile --windowed --name 霸主tpac迁移工具 migrator_gui.py
+```
+
+`--windowed` keeps the console window from appearing. The GUI renders Chinese natively through
+tkinter (UTF-8), so it is unaffected by the console code page.
+
+## Caveats
+
+- The tool only rewrites path references **inside `.tpac` files**. References to assets from
+  **XML files** (items, troops, etc. under `ModuleData`) are outside the package and must be renamed
+  by you — or the target module must keep the original asset names.
+- If the scan reports *external dependency GUIDs*, those assets reference something outside this
+  package. The target environment must be able to resolve them too, otherwise the model still will
+  not show up — such dependencies (usually materials/textures left in the source mod or in Native)
+  have to be migrated as well.
+- Migration only writes to the **destination** directory and **never modifies the source mod**.
+  Even so, back up the target module before your first batch run.
+- Try a few unimportant packages first and confirm in-game before running the whole batch.
+
+## Format reference
+
+The container format follows the reverse-engineering work of
+[TpacTool](https://github.com/hunharibo/TpacTool) (szszss / hunharibo, MIT), validated against real
+asset packages:
+
+```
+Header, 36 B: magic "TPAC" | version | package guid | item count | data offset | reserved
+Item:         type guid | item guid | version | name (length-prefixed)
+              | metadata length | metadata | checksum | segment count | segments[]
+              | dependency count | dependencies[]
+Segment:      offset | actual size | storage size | owner guid | type guid | unknown ×2 | storage format
+Storage format:  0 = raw, 1 = LZ4-HC
+```
+
+The tool ships a pure-Python LZ4 block decoder, so no third-party library is needed; if `lz4` is
+installed it is used when re-compressing — faster with it, fully functional without it.
+
+## Credits
+
+- Container format reverse engineering: [TpacTool](https://github.com/hunharibo/TpacTool) by
+  szszss / hunharibo (MIT).
+- Built for the *Mount & Blade II: Bannerlord* modding community.
