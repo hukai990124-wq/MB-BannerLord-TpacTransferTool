@@ -1,0 +1,165 @@
+# Bannerlord TPAC 批量迁移工具
+
+[English](README_EN.md) | **中文**
+
+把《骑马与砍杀 II：霸主》mod 里的 `.tpac` 资源包批量迁移到另一个 mod 包目录，
+自动重映射包内**被锁死的资源路径引用**，解决逐个手动搬运导致的路径失效、模型无法识别。
+
+## 它到底解决了什么
+
+`.tpac` 是 TaleWorlds 的资源容器。资源在打包时会把源路径写进包里，例如：
+
+```
+$BASE/Modules/MercenaryVariety/AssetSources/rome_items/mv_armor_coat.fbx
+```
+
+这条路径是**随包一起搬走**的。把 tpac 复制到别的 mod 之后，包内仍然指向原来那个模块，
+这就是"换个 mod 包就失效"的根源。
+
+本工具会解析容器，把这些引用按规则改写成新模块的路径：
+
+```
+$BASE/Modules/MercenaryVariety/  ->  $BASE/Modules/目标模块/
+```
+
+同时它会扫描包内资源之间的 **GUID 依赖**（材质 → 纹理、网格 → 材质都是 GUID 引用，不是路径），
+报告哪些依赖指向了包外，让你知道迁移后还缺什么。
+
+## 运行环境
+
+- Windows（启动器与图形界面面向 Windows；命令行是纯 Python）。
+- Python 3.8+，实测于 3.11。
+- **图形界面要求 Python 自带 `tkinter`**（python.org 官方安装包自带；部分精简版/嵌入式版本
+  以及 Microsoft Store 版本没有）。
+- **不需要任何第三方库**：LZ4 block 解码是纯 Python 实现。若环境里恰好装了 `lz4`，
+  重新压缩时会用它，装了更快、没装也完全正常。
+
+## 使用方法
+
+### 图形界面（推荐）
+
+双击 **`启动迁移工具.bat`**，或命令行执行 `python migrator_gui.py`。
+
+1. **源与目标**：添加要迁移的 mod 目录（或单个 `.tpac` 文件），再选目标模块目录。
+   点「查找游戏目录…」可以直接从 `Modules` 里挑一个模块。
+   - 目标模块名会自动从目录名推断，它决定替换成什么样的路径。
+2. **扫描源**：列出所有 tpac、条目数、内容构成、包外依赖数量。默认全选，点首列可勾选。
+3. **路径重映射规则**：扫描完成后会**依据包内真实出现的路径**自动建议规则（不是猜的）。
+   可以手工增删改。
+4. **选项**：建议保持「覆盖前备份」和「写盘后结构自检」开启。
+5. **开始迁移**：先用「预演（只看不改）」确认目标路径，再正式执行。
+
+出问题时用「回滚上次迁移」撤销——它会删除本次写入的文件，还原被覆盖前的备份。
+
+### 命令行
+
+```bat
+python migrator.py --source "E:\...\Modules\MercenaryVariety\Assets" ^
+                   --target "E:\...\Modules\MyMod" --to MyMod
+```
+
+常用参数：`--from <源模块名>`、`--rule "旧串=新串"`、`--on-conflict rename|overwrite|skip`、
+`--dry-run`、`--no-backup`、`--flat`（不保留相对目录）、`--rollback`（撤销上次迁移）、
+`--lang zh|en`。
+
+### 界面语言
+
+右上角可切换 **中文 / English**，选择会存进 `ui_config.json`，下次启动自动沿用。
+
+切换范围覆盖三层，不只是按钮文字：
+
+- 界面控件、表头、弹窗
+- 迁移过程日志与警告
+- 解析 / 重建的报错信息
+
+命令行可单独指定：`python migrator_gui.py --lang en`、`python migrator.py --lang en`。
+首次运行没有记录时，按 Windows 界面语言自动选（中文系统默认中文）。
+
+## 改写的安全策略
+
+tpac 是二进制容器，乱改长度会直接损坏文件。工具按保守程度分三档处理：
+
+| 情况 | 做法 |
+|---|---|
+| 新旧字符串**等长** | 直接字节替换，不改变任何结构长度，零风险 |
+| 字符串**带 i32 长度前缀**（tpac 的通用写法） | 同步改写长度前缀，结构自洽，支持变长 |
+| 既不等长、又找不到长度前缀 | **跳过并明确报告**，绝不硬改 |
+
+因为整个容器是按条目重新生成的，改长改短都会自动重算 TOC 与数据区偏移。
+
+未改写的资源段会**连压缩字节一起原样搬运**，不做多余的解压/重压，
+改动面被压到最小，上百 MB 的包也能处理（分段流式读写，不会把整个文件读进内存）。
+
+## 已验证
+
+格式实现经过真实文件校验，不是纸上推演：
+
+- **字节级 round-trip**：解析 23 个真实 tpac（含 137 MB 的包）后原样重建，
+  与原始文件**逐字节完全一致**。这证明容器布局的理解没有偏差。
+- **迁移端到端**：真实迁移 40 个资源包，40/40 成功，产物可重新解析、条目数一致、
+  段数据可正常解压，路径已改写为目标模块。
+- **回滚**：撤销 40 个文件，全部清理干净。
+
+## 目录结构
+
+```
+霸主tpac迁移工具/
+  tpac_core.py       容器读写 / LZ4 / 依赖图 / 重映射引擎
+  migrator.py        迁移执行层（发现、规则建议、冲突、备份、回滚、命令行）
+  migrator_gui.py    图形界面（中英文切换）
+  i18n.py            中英文文案表（界面 / 日志 / 报错）
+  启动迁移工具.bat    一键启动
+  ui_config.json     记住的语言选择（首次运行后生成）
+  tests/
+    test_roundtrip.py  字节级 round-trip 校验
+    test_remap.py      真实文件迁移端到端校验
+    test_i18n.py       语言表自检（缺译 / 占位符不一致）
+```
+
+跑校验：
+
+```bat
+python tests\test_i18n.py
+python tests\test_roundtrip.py
+python tests\test_remap.py
+```
+
+> `test_roundtrip.py` 与 `test_remap.py` 需要本机装有游戏
+> （默认路径 `E:\SteamLibrary\steamapps\common\Mount & Blade II Bannerlord`），
+> 路径不同请改脚本里的常量。
+
+### 打包成独立 EXE
+
+装好 PyInstaller 后：
+
+```bat
+pyinstaller --noconfirm --onefile --windowed --name 霸主tpac迁移工具 migrator_gui.py
+```
+
+`--windowed` 避免弹出控制台黑框。界面里的中文由 tkinter 原生渲染（UTF-8），
+不受控制台代码页影响。
+
+## 注意
+
+- 工具只改 tpac 内部的路径引用。**XML 里对资源的引用**（`ModuleData` 下的物品、兵种等）
+  不在 tpac 内，需要你自己同步改名，或让目标模块沿用原资源名。
+- 如果扫描报告出现「包外依赖 GUID」，说明这些资源引用了本包之外的东西。
+  目标环境必须同样能解析到它们，否则模型仍然显示不出来——这类依赖通常是材质/纹理
+  留在了源 mod 或原版里，需要一并迁移。
+- 迁移只会写目标目录，**不会改动源 mod**。但第一次批量操作前，仍然建议先备份目标模块。
+- 建议先拿几个不重要的包试一次，进游戏确认无误再批量跑。
+
+## 格式依据
+
+容器格式参考 TpacTool（szszss / hunharibo，MIT）的逆向结果，并在真实资源包上完成校验：
+
+```
+文件头 36B: magic "TPAC" | version | package guid | 条目数 | 数据区偏移 | 保留
+条目:      type guid | item guid | version | 名称(长度前缀) | metadata 长度 | metadata
+           | 校验和 | 段数 | 段[] | 依赖数 | 依赖[]
+段:        偏移 | 原始大小 | 存储大小 | owner guid | type guid | 未知×2 | 存储格式
+存储格式:  0 = 原始, 1 = LZ4-HC
+```
+
+工具自带纯 Python 的 LZ4 block 解码，无需安装任何第三方库；
+若环境里装了 `lz4`，重新压缩时会用它，装了更快、没装也能正常工作。
