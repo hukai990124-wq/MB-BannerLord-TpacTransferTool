@@ -74,6 +74,18 @@ KNOWN_SEGMENT_GUIDS: Dict[str, str] = {
 
 ZERO_GUID = b"\x00" * 16
 
+# 运行时缓存（RuntimeDataCache）
+#
+# 引擎把资源包对应的网格 / 贴图**真实数据**缓存在模块根目录下的
+# `RuntimeDataCache/<GUID>.rdc`，包内只有引用、没有像素。文件名 GUID 就是下面这个
+# "package guid"（头部第 8~24 字节）。只搬 .tpac 而不搬这个目录，结果是：装备在
+# 游戏里能买到、能装备，引擎日志里也有渲染请求，但模型一片空白，且一句报错都没有
+# —— 实测栽过这个跟头，所以迁移时必须一起搬。
+#
+# 注意：材质包（`*_mtl.tpac`）天生没有运行时缓存，"找不到"是正常现象而非错误。
+CACHE_DIR_NAME = "RuntimeDataCache"
+CACHE_EXT = ".rdc"
+
 
 class TpacError(Exception):
     """tpac 解析 / 重建错误。"""
@@ -243,6 +255,52 @@ def guid_str(raw: bytes) -> str:
     a, b, c = struct.unpack_from("<IHH", raw, 0)
     d = raw[8:]
     return "%08x-%04x-%04x-%s-%s" % (a, b, c, d[:2].hex(), d[2:].hex())
+
+
+def cache_guid_of(path: str) -> str:
+    """该 tpac 对应的运行时缓存 GUID（大写 .NET 文本格式）；读不出返回 ""。
+
+    只读头部 24 字节、不解包——扫描几百个包时这点很关键。
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(24)
+    except OSError:
+        return ""
+    if len(head) < 24:
+        return ""
+    return guid_str(head[8:24]).upper()
+
+
+def cache_file_name(path: str) -> str:
+    """该 tpac 对应的运行时缓存文件名，形如 `82F204BF-0A6C-…-326A2D9D65B1.rdc`。
+
+    统一输出"大写 GUID + 小写扩展名"这一种写法：引擎是按文件名查的，早期版本的工具
+    曾把扩展名一起大写成 `.rDC`，那种名字引擎找不到。
+    """
+    guid = cache_guid_of(path)
+    return guid + CACHE_EXT if guid else ""
+
+
+def needs_runtime_cache(report: "PackageReport") -> bool:
+    """这个包在源模块里**应该**有一份对应的 `.rdc` 吗？
+
+    经验规则（实测 MCV 78 个 + 老 Vaegir 6 个都吻合）：
+      * 类型只含 `Material`（且解析无错）→ 材质包，**不需要**缓存
+      * 其它情况（几何 / 贴图 / 多类型 / 解析失败）→ 都应有缓存
+
+    用 `types` 判断而不是文件名后缀，因为后缀约定不统一（`*_mtl.tpac` /
+    `*_material_mtl.tpac` 都见过）；而 `types` 是引擎烘焙时实际写的。
+
+    解析失败/未知时**保守按"应有"算**：宁可让工具报"缺"提示用户去复查，
+    也不能让"其实是材质包但解错了"的情况被静默放行。
+    """
+    if not report or getattr(report, "error", ""):
+        return True
+    types = report.types or {}
+    if not types:
+        return True
+    return not (len(types) == 1 and "Material" in types)
 
 
 @dataclass
@@ -904,6 +962,21 @@ class PackageReport:
     strings: List[Tuple[str, str]] = field(default_factory=list)  # (区域, 文本)
     external_refs: Set[str] = field(default_factory=set)
     error: str = ""
+    # 源模块 RuntimeDataCache/ 里对应的 .rdc（找不到为空；材质包本来就没有）
+    cache_path: str = ""
+    # 该包**是否应该**有运行时缓存（材质包 = False）。完整性审计靠这个字段。
+    cache_expected: bool = True
+    # 该包**是否应该**有运行时缓存（材质包 = False）。完整性审计靠这个字段。
+    cache_expected: bool = True
+
+    @property
+    def cache_size(self) -> int:
+        if not self.cache_path:
+            return 0
+        try:
+            return os.path.getsize(self.cache_path)
+        except OSError:
+            return 0
 
 
 def module_name_of(tpac_path: str) -> str:

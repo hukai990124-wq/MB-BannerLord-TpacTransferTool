@@ -52,8 +52,9 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from i18n import LANGS, get_lang, init_lang, save_lang, set_lang, tr
 from tpac_core import MappingRule, PackageReport, scan_package
 from migrator import (
-    MigrateOptions, compute_target_path, discover_tpac, module_root_of,
-    rollback, run_batch, suggest_rules,
+    MigrateOptions, attach_cache_info, compute_target_path, discover_tpac,
+    module_folder_name, module_root_of, name_alignment, rollback, run_batch,
+    suggest_rules,
 )
 
 # --------------------------------------------------------------------------
@@ -80,6 +81,10 @@ LANG_LABELS = ("中文", "English")
 
 CHECKED = "☑"
 UNCHECKED = "☐"
+# 扫描结果表里"缓存"列的两种取值：材质包本来就没有运行时缓存，显示破折号而不是叉，
+# 免得让人以为出错了
+CACHE_HIT = "✓"
+CACHE_MISS = "—"
 
 
 def human_size(num: float) -> str:
@@ -117,6 +122,7 @@ class App(tk.Tk):
         self.unchecked: set = set()      # 被取消勾选的包路径
         self.msgq: "queue.Queue" = queue.Queue()
         self.busy = False
+        self.cancel_event = threading.Event()   # 扫描的取消信号
         self._texts: list = []           # (key, widget) 需要随语言刷新
         self._headings: list = []        # (tree, column, key)
 
@@ -243,31 +249,46 @@ class App(tk.Tk):
         self._txt("lbl.module_hint", ttk.Label(mod_row, style="Dim.TLabel")).pack(side="left")
         self.target_var.trace_add("write", lambda *_: self._sync_module_name())
 
+        # 文件夹名与模块 Id 不一致时，这里会出现一条红色硬告警。两边不同名意味着
+        # 包内路径必然有一边解析不到，是「装备进游戏但模型空白且无任何报错」的成因。
+        self.align_var = tk.StringVar(value="")
+        self.align_lbl = tk.Label(self, textvariable=self.align_var, bg=BG,
+                                  fg=ERR, font=FONT, justify="left", anchor="w",
+                                  wraplength=1100)
+        self.align_lbl.pack(fill="x", padx=14, pady=(4, 0))
+
         btn_row = ttk.Frame(self)
         btn_row.pack(fill="x", padx=14, pady=(10, 0))
         self.scan_btn = self._txt("btn.scan",
                                   ttk.Button(btn_row, command=self._start_scan,
                                              style="Accent.TButton"))
         self.scan_btn.pack(side="left")
+        self.cancel_btn = self._txt("btn.cancel_scan",
+                                    ttk.Button(btn_row, command=self._cancel_scan))
+        self.cancel_btn.configure(state="disabled")
+        self.cancel_btn.pack(side="left", padx=(6, 0))
         self._txt("lbl.scan_hint", ttk.Label(btn_row, style="Dim.TLabel")).pack(
             side="left", padx=10)
 
         # 2. 扫描结果
         self._txt("sec.results", ttk.Label(self, style="Header.TLabel")).pack(
             fill="x", padx=14, pady=(12, 4))
-        cols = ("sel", "module", "path", "size", "items", "ext", "types")
+        cols = ("sel", "module", "path", "size", "items", "ext", "cache", "types")
         self.tree = ttk.Treeview(self, columns=cols, show="headings", height=9)
         for key, column, width, anchor in (
             ("col.sel", "sel", 34, "center"),
             ("col.module", "module", 150, "w"),
-            ("col.path", "path", 430, "w"),
+            ("col.path", "path", 400, "w"),
             ("col.size", "size", 78, "e"),
             ("col.items", "items", 56, "center"),
             ("col.ext", "ext", 70, "center"),
-            ("col.types", "types", 150, "w"),
+            ("col.cache", "cache", 92, "center"),
+            ("col.types", "types", 130, "w"),
         ):
             self._head(self.tree, column, key)
             self.tree.column(column, width=width, anchor=anchor)
+        # 缓存缺失行整体染红（仍允许勾选/迁移；这里只做提示色）
+        self.tree.tag_configure("missing", foreground="#A32D2D")
         self.tree.pack(fill="both", expand=False, padx=14)
         self.tree.bind("<Button-1>", self._toggle_row)
         self._txt("btn.toggle_all",
@@ -304,7 +325,8 @@ class App(tk.Tk):
         opt = ttk.Frame(self)
         opt.pack(fill="x", padx=14)
         self.backup_var = tk.BooleanVar(value=True)
-        self.relative_var = tk.BooleanVar(value=True)
+        # 默认不还原源目录结构：你选的目录就是文件落点，避免拼出 Assets\Assets\ 这类嵌套
+        self.relative_var = tk.BooleanVar(value=False)
         self.verify_var = tk.BooleanVar(value=True)
         self.conflict_var = tk.StringVar(value="rename")
         self._txt("chk.backup",
@@ -371,6 +393,7 @@ class App(tk.Tk):
                 pass
         self._refresh_tree()
         self._refresh_rules()
+        self._check_name_alignment()
         if not self.busy:
             self._status(tr("status.ready"))
 
@@ -427,14 +450,37 @@ class App(tk.Tk):
             self.target_var.set(os.path.abspath(path))
 
     def _sync_module_name(self) -> None:
+        """按目标目录自动填目标模块名。
+
+        取**文件夹名**（不是 SubModule.xml 里的 Id）：包内写死的
+        `$BASE/Modules/<X>/AssetSources/...` 是编辑器烘焙时记下的字面路径，X 就是当时的
+        文件夹名——工坊 mod 上传后被 Steam 改成了数字 ID，包内仍留着作者原本的文件夹名。
+        写 Id 会让路径指向一个不存在的目录。
+        """
         path = self.target_var.get().strip()
         if not path:
+            self.align_var.set("")
             return
-        root = module_root_of(os.path.join(path, "x"))
-        name = os.path.basename(root) if root else os.path.basename(
-            path.rstrip("\\/"))
+        name = module_folder_name(path)
         if name and name.lower() != "modules":
             self.module_var.set(name)
+        self._check_name_alignment()
+
+    def _check_name_alignment(self) -> None:
+        """文件夹名与声明 Id 不一致时亮红字。
+
+        不一致 = 包内路径只能对上其中一个 = 必有一边解析不到；实测表现是装备能进游戏
+        也能装备，但模型一片空白，日志里连一句报错都没有。所以这里必须显眼。
+        """
+        path = self.target_var.get().strip()
+        if path:
+            folder, declared, mismatch = name_alignment(path)
+        else:
+            folder, declared, mismatch = "", "", False
+        if path and mismatch:
+            self.align_var.set(tr("warn.name_mismatch", folder=folder, id=declared))
+        else:
+            self.align_var.set("")
 
     def _find_game(self) -> None:
         def worker():
@@ -487,19 +533,34 @@ class App(tk.Tk):
             self._info(tr("dlg.title"), tr("msg.no_source"))
             return
         self.busy = True
+        self.cancel_event.clear()
         self.scan_btn.configure(state="disabled")
+        self.cancel_btn.configure(state="normal")
         self.tree.delete(*self.tree.get_children())
         self.reports.clear()
         self.unchecked.clear()
-        self._status(tr("status.scanning"))
-        files = discover_tpac(self.sources)
+        self._status(tr("status.discovering"))
+
+        sources = list(self.sources)
 
         def worker():
             try:
+                # 关键：翻目录本身很慢（源目录大、或选到云盘/整个 Modules 时更慢），
+                # 必须放在后台线程。放在主线程会占住 Tk 事件循环，界面按钮变灰、
+                # 窗口发黑，看起来像死机（实测用户点扫描后就是这个现象）。
+                files = discover_tpac(sources)
+                if self.cancel_event.is_set():
+                    self.msgq.put(("scan_cancelled", 0, None))
+                    return
+                self.msgq.put(("discovered", len(files), None))
                 if not files:
                     self.msgq.put(("log", tr("log.no_tpac"), "warn"))
+                    self.msgq.put(("scan_done", 0, None))
                     return
                 for index, path in enumerate(files):
+                    if self.cancel_event.is_set():
+                        self.msgq.put(("scan_cancelled", index, None))
+                        return
                     report = scan_package(path)
                     self.reports[path] = report
                     self.msgq.put(("report", report, (index + 1, len(files))))
@@ -508,6 +569,14 @@ class App(tk.Tk):
                 self.msgq.put(("traceback", traceback.format_exc(), None))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _cancel_scan(self) -> None:
+        """请求停止扫描；worker 每个包检查一次取消位，最多多扫一个包。"""
+        if not self.busy:
+            return
+        self.cancel_event.set()
+        self.cancel_btn.configure(state="disabled")
+        self._status(tr("status.cancelling"))
 
     def _toggle_row(self, event) -> None:
         row = self.tree.identify_row(event.y)
@@ -645,6 +714,29 @@ class App(tk.Tk):
             self._info(tr("dlg.title"), tr("msg.need_module"))
             return
 
+        # 文件夹名与模块 Id 必须一致：包内路径只能对上其中一个，不一致必有一边失效
+        # （实测症状是装备进游戏了但模型空白、日志无报错）。这里直接弹窗确认。
+        folder, declared, mismatch = name_alignment(target)
+        if mismatch:
+            self._log(tr("warn.name_mismatch", folder=folder, id=declared), "err")
+            if not self.smoke and not messagebox.askyesno(
+                    tr("dlg.name_mismatch_title"),
+                    tr("msg.name_mismatch_confirm", folder=folder, id=declared)):
+                self._status(tr("status.ready"))
+                return
+        if declared and declared != module:
+            self._log(tr("log.module_id_mismatch", want=declared, got=module),
+                      "warn")
+
+        # 没有规则时包内路径不会被改写，等于只是原样复制一份废包——直接拦住。
+        if not [r for r in self.rules if r.enabled]:
+            if dry_run:
+                self._log(tr("log.no_rules_dry"), "warn")
+            else:
+                self._info(tr("dlg.title"), tr("msg.need_rules"))
+                self._log(tr("log.no_rules"), "warn")
+                return
+
         if dry_run:
             self._log(tr("log.dry_header"), "dim")
             for path in selected[:50]:
@@ -687,17 +779,27 @@ class App(tk.Tk):
 
     # -- 消息轮询 --------------------------------------------------------
     def _poll(self) -> None:
-        try:
-            while True:
+        # 每轮最多处理 200 条：扫描几千个包时不能一次刷完，否则界面饿死；
+        # 剩下的消息 120ms 后由下一轮继续取。
+        for _ in range(200):
+            try:
                 kind, payload, extra = self.msgq.get_nowait()
+            except queue.Empty:
+                break
+            try:
                 if kind == "log":
                     self._log(payload, extra or "")
                 elif kind == "report":
                     self._insert_report(payload)
                     if extra:
                         self._status(tr("status.scan_progress", a=extra[0], b=extra[1]))
+                elif kind == "discovered":
+                    self._log(tr("log.discovering_done", count=payload), "dim")
+                    self._status(tr("status.scan_count", count=payload))
                 elif kind == "scan_done":
                     self._finish_scan(payload)
+                elif kind == "scan_cancelled":
+                    self._finish_scan(payload, cancelled=True)
                 elif kind == "done":
                     self.busy = False
                     self.run_btn.configure(state="normal")
@@ -712,29 +814,42 @@ class App(tk.Tk):
                     self._log(payload, "err")
                     self.busy = False
                     self.scan_btn.configure(state="normal")
+                    self.cancel_btn.configure(state="disabled")
                     self.run_btn.configure(state="normal")
                     self._status(tr("status.error"))
-        except queue.Empty:
-            pass
+            except tk.TclError:
+                # 窗口正在销毁（自检收尾）时不再刷新界面
+                return
         self.after(120, self._poll)
 
     def _insert_report(self, report: PackageReport) -> None:
         sep = tr("types.sep")
         types = sep.join("%s×%d" % (k, v) for k, v in
                          sorted(report.types.items(), key=lambda kv: -kv[1])[:3])
+        # 缓存列三态：有缓存 / 材质包无需 / 缺失
+        # 材质包没有缓存是正常的；只有"应带却没带"才标红（仍不阻断）。
+        if not report.cache_expected:
+            cache = CACHE_MISS + " " + tr("col.cache_material")
+            row_tag = ""
+        elif report.cache_path:
+            cache = CACHE_HIT + " " + human_size(report.cache_size)
+            row_tag = ""
+        else:
+            cache = tr("col.cache_missing")
+            row_tag = "missing"
         if report.error:
-            self.tree.insert("", "end", tags=(report.path,),
+            self.tree.insert("", "end", tags=(report.path, "missing"),
                              values=(UNCHECKED, "-", report.path, "-", "-", "-",
-                                     tr("log.parse_failed", err=report.error)))
+                                     cache, tr("log.parse_failed", err=report.error)))
             self.unchecked.add(report.path)   # 解析失败的不默认勾选
             return
-        self.tree.insert("", "end", tags=(report.path,), values=(
+        self.tree.insert("", "end", tags=(report.path, row_tag) if row_tag else (report.path,), values=(
             UNCHECKED if report.path in self.unchecked else CHECKED,
             report.module or "-",
             os.path.relpath(report.path, os.path.dirname(
                 module_root_of(report.path) or report.path)),
             human_size(report.size), report.item_count,
-            len(report.external_refs), types))
+            len(report.external_refs), cache, types))
 
     def _refresh_tree(self) -> None:
         """按当前语言重建扫描结果表，并保留勾选状态。"""
@@ -742,15 +857,28 @@ class App(tk.Tk):
         for report in self.reports.values():
             self._insert_report(report)
 
-    def _finish_scan(self, count: int) -> None:
+    def _finish_scan(self, count: int, cancelled: bool = False) -> None:
         self.busy = False
+        self.cancel_event.clear()
         self.scan_btn.configure(state="normal")
+        self.cancel_btn.configure(state="disabled")
+        if cancelled:
+            self._status(tr("status.scan_cancelled"))
+            self._log(tr("log.scan_cancelled", count=count), "warn")
+            return
         self._status(tr("status.scan_done", count=count))
         self._log(tr("log.scan_done", count=count), "ok")
         externals = sum(len(r.external_refs) for r in self.reports.values())
         if externals:
             self._log(tr("log.externals", count=externals), "warn")
         if self.reports:
+            # 缓存是"能不能显示出来"的关键，扫完就先把命中数摊开讲，
+            # 别等迁移完进游戏才发现少搬了缓存。
+            cached = sum(1 for r in self.reports.values() if r.cache_path)
+            if cached:
+                self._log(tr("log.cache_scan", count=cached), "dim")
+            else:
+                self._log(tr("log.cache_none"), "warn")
             self._suggest()
 
     def _on_game_found(self, hits) -> None:

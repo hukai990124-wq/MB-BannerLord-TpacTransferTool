@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import locale
 import os
+import sys
 import threading
 
 LANGS = ("zh", "en")
@@ -49,6 +50,7 @@ STRINGS = {
     "lbl.module_hint": {"zh": "（用于生成 $BASE/Modules/<模块名>/ 替换规则）",
                         "en": "(used to build $BASE/Modules/<name>/ rules)"},
     "btn.scan": {"zh": "扫描源", "en": "Scan Sources"},
+    "btn.cancel_scan": {"zh": "取消扫描", "en": "Cancel Scan"},
     "lbl.scan_hint": {"zh": "扫描后会自动建议重映射规则",
                       "en": "Remap rules are suggested after scanning"},
 
@@ -60,6 +62,9 @@ STRINGS = {
     "col.size": {"zh": "大小", "en": "Size"},
     "col.items": {"zh": "条目", "en": "Items"},
     "col.ext": {"zh": "包外依赖", "en": "External Deps"},
+    "col.cache": {"zh": "缓存", "en": "Cache"},
+    "col.cache_material": {"zh": "材质无需", "en": "Material (no cache)"},
+    "col.cache_missing": {"zh": "缺失", "en": "Missing"},
     "col.types": {"zh": "内容", "en": "Contents"},
     "btn.toggle_all": {"zh": "全选 / 全不选", "en": "Select All / None"},
 
@@ -78,7 +83,8 @@ STRINGS = {
 
     "sec.options": {"zh": "4. 选项", "en": "4. Options"},
     "chk.backup": {"zh": "覆盖前备份原文件", "en": "Back up before overwriting"},
-    "chk.relative": {"zh": "保留相对目录结构", "en": "Keep relative folder structure"},
+    "chk.relative": {"zh": "保留源目录结构（默认关，关=文件直投）",
+                     "en": "Keep source folder structure (default off = flat)"},
     "chk.verify": {"zh": "写盘后结构自检", "en": "Verify structure after write"},
     "lbl.conflict": {"zh": "同名冲突：", "en": "On conflict:"},
 
@@ -88,6 +94,11 @@ STRINGS = {
 
     "status.ready": {"zh": "就绪", "en": "Ready"},
     "status.scanning": {"zh": "扫描中…", "en": "Scanning…"},
+    "status.discovering": {"zh": "正在列出 .tpac…", "en": "Listing .tpac files…"},
+    "status.scan_count": {"zh": "扫描中，共 %(count)d 个包",
+                          "en": "Scanning %(count)d packages"},
+    "status.cancelling": {"zh": "正在取消…", "en": "Cancelling…"},
+    "status.scan_cancelled": {"zh": "已取消扫描", "en": "Scan cancelled"},
     "status.scan_progress": {"zh": "扫描中 %(a)d/%(b)d", "en": "Scanning %(a)d/%(b)d"},
     "status.scan_done": {"zh": "扫描完成：%(count)d 个包",
                          "en": "Scan complete: %(count)d packages"},
@@ -123,6 +134,23 @@ STRINGS = {
     "dlg.rollback_title": {"zh": "确认", "en": "Confirm"},
     "dlg.rollback_msg": {"zh": "将删除上次迁移写入的文件，并还原被覆盖的备份。继续？",
                          "en": "This deletes files written by the last migration and restores backups. Continue?"},
+    "dlg.name_mismatch_title": {"zh": "文件夹名与模块 Id 不一致",
+                                "en": "Folder name differs from module Id"},
+    "msg.name_mismatch_confirm": {
+        "zh": "目标模块的文件夹叫「%(folder)s」，但它在 SubModule.xml 里声明的 Id 是「%(id)s」。\n\n"
+              "包内写死的 $BASE/Modules/〈名字〉/ 路径只能是两者之一，所以必有一边解析不到——"
+              "实测表现是：装备能进游戏、能装备，但模型一片空白，日志里一句报错都没有。\n\n"
+              "最省事的修法是把文件夹改名为 %(id)s，然后把「目标模块名」也填成 %(id)s。\n\n"
+              "仍要按当前设置继续迁移吗？",
+        "en": "The target module folder is named \"%(folder)s\", but the Id declared in its "
+              "SubModule.xml is \"%(id)s\".\n\n"
+              "The $BASE/Modules/〈name〉/ paths baked into the packages can only match one of "
+              "them, so one side is guaranteed to fail — in practice the item shows up in game "
+              "and can be equipped, but the model is blank and the log reports nothing.\n\n"
+              "Easiest fix: rename the folder to %(id)s, then set the target module name to "
+              "%(id)s as well.\n\n"
+              "Continue the migration with the current settings anyway?",
+    },
 
     "msg.no_source": {"zh": "请先添加源目录或 .tpac 文件",
                       "en": "Add a source folder or .tpac file first"},
@@ -135,17 +163,93 @@ STRINGS = {
                         "en": "Select the packages to migrate in the scan results"},
     "msg.need_target": {"zh": "请先选择目标模块目录",
                         "en": "Choose the target module folder first"},
+    "msg.need_rules": {
+        "zh": "规则列表是空的，迁移已被拦下。\n\n"
+              "规则决定包内的 $BASE/Modules/〈模块名〉/ 路径要改成什么。没有规则，"
+              "工具只会把文件原样复制，包内路径仍指向原模块——进游戏就是找不到模型和贴图，"
+              "却看不出任何报错。\n\n"
+              "另外两点容易踩坑：\n"
+              "1. 目标模块的文件夹名和它 SubModule.xml 里的 Id 必须一致（例如都叫 test_transe）。"
+              "包内路径只能对上其中一个，不一致就必然失效。\n"
+              "2. 网格和贴图的真实数据在模块根目录的 RuntimeDataCache/ 里，不在 .tpac 内。"
+              "工具会自动把每个包对应的 <GUID>.rdc 一并搬过去（材质包本来就没有缓存）。\n\n"
+              "请先点「自动建议」，或手动「添加」一条规则。",
+        "en": "The rule list is empty, so the migration was blocked.\n\n"
+              "Rules decide what the $BASE/Modules/〈module〉/ paths inside the packages "
+              "become. Without any rule the tool would only copy files verbatim, leaving "
+              "them pointing at the original module — the game then finds no meshes or "
+              "textures, without reporting anything.\n\n"
+              "Two things that are easy to get wrong:\n"
+              "1. The target module's folder name and the Id in its SubModule.xml must be "
+              "identical (e.g. both test_transe). Package paths can only match one of them, "
+              "so any mismatch is guaranteed to fail.\n"
+              "2. The real mesh and texture data lives in RuntimeDataCache/ at the module "
+              "root, not inside the .tpac. The tool now moves each package's <GUID>.rdc "
+              "along automatically (material packages never have one).\n\n"
+              "Click \"Suggest\" first, or add a rule manually.",
+    },
+    "warn.name_mismatch": {
+        "zh": "⚠ 目标文件夹叫「%(folder)s」，模块 Id 是「%(id)s」，两者必须一致。"
+              "包内路径只能对上其中一个，不一致时资源必然显示不出来（而且游戏不报错）。"
+              "请把文件夹改名为 %(id)s，并把「目标模块名」也改成 %(id)s。",
+        "en": "⚠ Target folder is \"%(folder)s\" but the module Id is \"%(id)s\" — these must "
+              "match. Package paths can only match one of them, so resources are guaranteed "
+              "to fail to load (silently, with no error in the log). Rename the folder to "
+              "%(id)s and set the target module name to %(id)s.",
+    },
 
     # -------------------------------------------------------------- 日志
     "log.no_tpac": {"zh": "没有找到任何 .tpac 文件", "en": "No .tpac files found"},
+    "log.discovering_done": {"zh": "已发现 %(count)d 个 .tpac，开始逐个解析",
+                             "en": "Found %(count)d .tpac files, parsing them now"},
+    "log.scan_cancelled": {"zh": "扫描已取消（已解析 %(count)d 个）",
+                           "en": "Scan cancelled after %(count)d packages"},
     "log.scan_done": {"zh": "扫描完成：%(count)d 个 tpac",
                       "en": "Scan complete: %(count)d tpac"},
     "log.externals": {"zh": "发现 %(count)d 个指向包外的依赖引用；这类依赖需要目标环境同样能解析到",
                       "en": "Found %(count)d references pointing outside the package; the target must be able to resolve them"},
+    "log.cache_scan": {
+        "zh": "其中 %(count)d 个包在源模块的 RuntimeDataCache/ 里找到了对应缓存，迁移时会一并带走"
+              "（材质包本来就没有缓存，列里显示「—」是正常的）",
+        "en": "%(count)d packages have a matching cache in the source module's RuntimeDataCache/ and will "
+              "be moved along (material packages never have one — a \"—\" in that column is normal)"},
+    "log.cache_none": {
+        "zh": "没有任何包在源模块里找到运行时缓存。若这些包在游戏里本来就是正常显示的，"
+              "说明缓存放在别处；否则请先确认源模块目录选对了。",
+        "en": "None of the packages has a runtime cache in the source module. If these packages already "
+              "render fine in game, the cache simply lives elsewhere; otherwise double-check the source."},
+    "log.cache_audit_only_material": {
+        "zh": "缓存完整性：共 %(material)d 个材质包，无需缓存（已自动跳过）",
+        "en": "Cache audit: %(material)d material package(s) — no cache needed (auto-skipped)"},
+    "log.cache_audit_ok": {
+        "zh": "缓存完整性：应带 %(expected)d 个，源模块齐全；其中 %(material)d 个是材质包无需缓存",
+        "en": "Cache audit: %(expected)d expected — source module has them all; "
+              "%(material)d material package(s) need no cache"},
+    "log.cache_audit_missing": {
+        "zh": "缓存完整性：应带 %(expected)d 个，源模块仅齐 %(ok)d 个，缺失 %(miss)d 个；"
+              "其中 %(material)d 个是材质包无需缓存（缺失会标红但**不阻止迁移**）",
+        "en": "Cache audit: %(expected)d expected, source has %(ok)d, missing %(miss)d; "
+              "%(material)d material package(s) need no cache (missing entries are flagged in red "
+              "but do NOT block the migration)"},
+    "log.cache_audit_more": {
+        "zh": "    … 剩余 %(n)d 个未列出",
+        "en": "    … %(n)d more not shown"},
+    "log.cache_audit_target_ok": {
+        "zh": "目标模块校验：%(ok)d 个缓存全部到位",
+        "en": "Target module check: all %(ok)d caches in place"},
+    "log.cache_audit_target_missing": {
+        "zh": "目标模块校验：%(ok)d 个到位，缺失 %(miss)d 个（写入失败 / 文件被占 / 磁盘满）",
+        "en": "Target module check: %(ok)d in place, missing %(miss)d (write failed / file locked / disk full)"},
     "log.suggest_none": {"zh": "没有发现需要重映射的模块路径（可能包内没有 $BASE/Modules/… 形式的引用）",
                          "en": "No module paths need remapping (packages may hold no $BASE/Modules/… references)"},
     "log.suggest_done": {"zh": "已建议 %(total)d 条规则（新增 %(added)d）",
                          "en": "Suggested %(total)d rules (%(added)d new)"},
+    "log.no_rules": {"zh": "规则列表为空，已阻止迁移——否则只会把文件原样复制，包内路径不会被改写",
+                     "en": "Rule list is empty; migration blocked — files would be copied verbatim with no path rewrite"},
+    "log.no_rules_dry": {"zh": "警告：规则列表为空，下面的预演结果仅供参考；实际迁移会被拦住",
+                         "en": "Warning: rule list is empty; the preview below is informational only — a real run would be blocked"},
+    "log.module_id_mismatch": {"zh": "提示：目标目录所属模块声明的 Id 是「%(want)s」，而你填的是「%(got)s」。两者必须一致，否则包内路径必有一边解析不到",
+                               "en": "Note: the target module declares Id \"%(want)s\" but you entered \"%(got)s\". These must match, or one side of the package paths will fail to resolve"},
     "log.dry_header": {"zh": "预演模式：仅列出将要写入的位置，不改动任何文件",
                        "en": "Dry run: listing destinations only, nothing is written"},
     "log.dry_total": {"zh": "共 %(count)d 个包待迁移", "en": "%(count)d packages pending"},
@@ -196,6 +300,22 @@ STRINGS = {
     "mig.err_item_count": {"zh": "条目数不一致：源 %(before)d -> 产物 %(after)d",
                            "en": "Item count mismatch: source %(before)d -> output %(after)d"},
 
+    # -------------------------------------------------------------- 运行时缓存
+    "mig.cache_copied": {"zh": "   缓存：%(name)s（%(size)s，已随包复制）",
+                         "en": "   Cache: %(name)s (%(size)s, copied along)"},
+    "mig.cache_overwritten": {
+        "zh": "   缓存：%(name)s（%(size)s，覆盖了目标模块中的同名缓存）",
+        "en": "   Cache: %(name)s (%(size)s, overwrote the same-name cache in the target)"},
+    "mig.cache_fail": {"zh": "缓存复制失败：%(err)s —— 少了它，目标模块里这件装备会显示空白",
+                       "en": "Cache copy failed: %(err)s — without it the matching item renders blank in the target"},
+    "mig.cache_backup_fail": {"zh": "缓存备份失败：%(err)s", "en": "Cache backup failed: %(err)s"},
+    "mig.cache_summary": {
+        "zh": "运行时缓存：新增 %(copied)d，覆盖 %(overwritten)d，已存在 %(same)d，"
+              "按策略跳过 %(skipped)d，源内无缓存 %(missing)d（材质包通常如此），失败 %(failed)d",
+        "en": "RuntimeDataCache: %(copied)d added, %(overwritten)d overwritten, "
+              "%(same)d already present, %(skipped)d skipped by policy, "
+              "%(missing)d absent in source (usual for material packages), %(failed)d failed"},
+
     # -------------------------------------------------------------- 命令行
     "cli.desc": {"zh": "批量迁移 Bannerlord .tpac 资源包",
                  "en": "Batch-migrate Bannerlord .tpac asset packages"},
@@ -204,11 +324,21 @@ STRINGS = {
     "cli.target": {"zh": "目标模块目录", "en": "Target module folder"},
     "cli.from": {"zh": "源模块名（用于生成替换规则）",
                  "en": "Source module name (used to build replace rules)"},
-    "cli.to": {"zh": "目标模块名（默认取目标目录名）",
-               "en": "Target module name (defaults to the folder name)"},
+    "cli.to": {"zh": "目标模块名（默认取目标模块的文件夹名）",
+               "en": "Target module name (defaults to the target module's folder name)"},
+    "cli.name_mismatch": {
+        "zh": "⚠ 目标文件夹「%(folder)s」与模块 Id「%(id)s」不一致：包内 $BASE/Modules/… 路径只能对上其中一个，必然有一边失效。\n"
+              "   建议先把文件夹改名为 %(id)s（启动器按 Id 记录勾选状态，改名不会丢）。",
+        "en": "! Target folder \"%(folder)s\" differs from module Id \"%(id)s\": the baked "
+              "$BASE/Modules/... paths can only match one of them, so one side is bound to fail.\n"
+              "   Recommended: rename the folder to %(id)s (the launcher keys selection by Id, so nothing is lost).",
+    },
     "cli.rule": {"zh": "自定义规则，格式 旧串=新串，可重复",
                  "en": "Custom rule as OLD=NEW, repeatable"},
-    "cli.flat": {"zh": "不保留相对目录结构", "en": "Do not keep relative folder structure"},
+    "cli.flat": {"zh": "文件直投目标目录（默认行为，保留仅为兼容旧命令）",
+                 "en": "Drop files flat into the target dir (default; kept for compatibility)"},
+    "cli.keep_relative": {"zh": "还原源模块内的相对目录结构（默认关闭）",
+                          "en": "Rebuild the source-relative folder tree (off by default)"},
     "cli.rollback": {"zh": "回滚最近一次迁移", "en": "Roll back the last migration"},
     "cli.lang": {"zh": "输出语言：zh 或 en", "en": "Output language: zh or en"},
     "cli.need_source": {"zh": "请用 --source 指定要迁移的目录或 .tpac 文件",
@@ -218,8 +348,17 @@ STRINGS = {
                      "en": "Found %(count)d tpac, scanning..."},
     "cli.rules_header": {"zh": "\n重映射规则：", "en": "\nRemap rules:"},
     "cli.rules_none": {"zh": "  （无）", "en": "  (none)"},
-    "cli.dry_header": {"zh": "\n预演模式，不写盘。目标路径示例：",
+    "cli.rules_none_warn": {"zh": "  ⚠ 没有任何规则：包内 $BASE/Modules/… 路径不会被改写，迁过去进游戏会找不到资源。请用 --from/--to 指定源与目标模块名。",
+                            "en": "  ! No rules: $BASE/Modules/... paths will not be rewritten and the game will find no assets. Use --from/--to to name the source and target modules."},    "cli.dry_header": {"zh": "\n预演模式，不写盘。目标路径示例：",
                        "en": "\nDry run, nothing will be written. Example destinations:"},
+    "cli.cache_line": {"zh": "缓存 %(name)s  ->  %(dst)s",
+                       "en": "cache %(name)s  ->  %(dst)s"},
+    "cli.cache_none": {"zh": "缓存：源模块内没有对应的 .rdc（材质包通常如此）",
+                       "en": "cache: no matching .rdc in the source module (usual for material packages)"},
+    "cli.cache_hint": {
+        "zh": "（每个包对应的 RuntimeDataCache/<GUID>.rdc 都会自动一起迁移，落在目标模块根目录下）",
+        "en": "(each package's RuntimeDataCache/<GUID>.rdc is migrated along automatically, "
+              "landing at the target module root)"},
     "cli.summary": {"zh": "\n完成：成功 %(ok)d / 共 %(total)d",
                     "en": "\nDone: %(ok)d succeeded / %(total)d total"},
 
@@ -285,7 +424,16 @@ def set_lang(code: str) -> None:
 
 
 def config_path() -> str:
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_NAME)
+    """语言配置文件的存放目录。
+
+    源码运行时跟 i18n.py 放一起；打包成 exe 后 __file__ 指向 PyInstaller 的临时
+    解包目录（程序退出就被删掉），所以冻结状态下改用 exe 所在目录，语言选择才存得住。
+    """
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, CONFIG_NAME)
 
 
 def load_saved_lang() -> str:
