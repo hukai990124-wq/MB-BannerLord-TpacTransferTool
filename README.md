@@ -57,6 +57,33 @@ Modules/<模块名>/RuntimeDataCache/82F204BF-0A6C-4F0E-A023-326A2D9D65B1.rdc
 - **材质包（`*_mtl.tpac`）天生没有缓存**，工具会正常跳过而不报错。实测 MCV 的 62 个包里，
   50 个有缓存、12 个材质包没有，一个不漏。
 
+### 打包文件（`AssetPackages/*.tpac`）是自包含的，不需要缓存
+
+`AssetPackages/`（以及 `EmAssetPackages/`）下的包和 `Assets/` 下的单资源包**不是一回事**：
+
+| | `Assets/<子目录>/xxx.tpac` | `AssetPackages/xxx.tpac` |
+|---|---|---|
+| 装什么 | **一件**资源（一个网格/材质/贴图） | **一大堆**资源，自带完整数据 |
+| 头部 GUID 是什么 | **该资源的 GUID**（= 缓存文件名） | **包格式 GUID**（一个固定值） |
+| 要另配 `.rdc` 缓存吗 | 要 | **不要**，数据就在包里 |
+
+打包文件头部那个 GUID 实测是固定的——扫了 244 个打包文件，**243 个都是同一个值**
+`807E3D8D-E501-499B-A1D3-22AE3F4E64F3`。旧版本工具把它当成资源 GUID 去
+`RuntimeDataCache/` 找缓存，自然一个都找不到，于是把大包全标成红字「缺缓存」——
+这是误报。现在工具会认出这类包，缓存列显示**「自包含」**，不标红、也不计入完整性统计。
+
+### 关于 `RuntimeDataCache/` 的真相
+
+它**不是**随 mod 一起发布的东西，而是 Bannerlord 编辑器**在你本机烘焙资源时**生成的副产物。
+实测扫遍全库：只有 3 个模块有 `RuntimeDataCache/`（都是自己用编辑器烘过的开发机模块），
+官方 **Native / SandBox / NavalDLC 以及所有从网上直接下载的 mod 都没有**。由此：
+
+- 迁移别人的 mod 时源里本来就没有缓存可搬，**这是常态，不是出错**；
+- 没有缓存也不必然白模——引擎首次加载会按包内 `metadata` 指向的
+  `AssetSources/<...>/xxx.png` **自己烘焙出缓存**，前提是 `AssetSources/` 里确实有源文件。
+  只有"既没缓存、源文件也不在"才会真的缺。
+- 所以「源里缺缓存」只是**提示**，工具永远不会因为缺缓存而阻止你迁移。
+
 ### 不需要搬的东西：AssetSources
 
 `AssetSources/` 是**编辑器用的美术源文件**（fbx、psd 之类），只在 Bannerlord 编辑器里
@@ -75,9 +102,13 @@ Modules/<模块名>/RuntimeDataCache/82F204BF-0A6C-4F0E-A023-326A2D9D65B1.rdc
 
 判定规则很简单：
 
-- **应带**：所有非材质包
-- **无需缓存**：只有 `Material` 类型的材质包（文件名 `*_mtl.tpac` 或 `*_material_mtl.tpac` 之类）
+- **无需缓存 · 材质包**：只有 `Material` 类型的材质包（文件名 `*_mtl.tpac` 或 `*_material_mtl.tpac` 之类）
+- **无需缓存 · 自包含**：`AssetPackages/` / `EmAssetPackages/` 下的打包文件（见上一节），
+  或头部 GUID 命中已知包格式 GUID
+- **应带**：其余所有单资源包
 - **缺失**：本应带缓存，但源模块里也找不到对应 `.rdc` —— 标红警告
+
+> 上面两类"无需缓存"都**不计入**完整性统计的分母，所以大包不会把统计数字污染成一片红。
 
 为什么不阻断？因为实测发现：游戏**首次加载**时，引擎会按包内 `metadata` 指向的源文件
 （`AssetSources/<...>/xxx.png` 等）**自己烘焙出缺的缓存**——前提是 `AssetSources/` 里有源文件。
@@ -95,6 +126,37 @@ Target module check: all 7 caches in place
 - 源里缺但目标里齐（说明游戏已烘焙过）→ 没事，照常用
 - 源里缺且目标里也缺 → 第一次进游戏会卡一下让引擎烘焙；过几秒就好
 - 迁移后**目标**侧缺（写盘失败 / 磁盘满）→ 这次是真出问题了，看上面的错误日志
+
+## 落点：把包放进哪个子文件夹
+
+做 mod 的人通常会按物品类别把资源分开放（`rome_items` / `levant_items` / `vaegir_items`…），
+方便在编辑器里翻找管理。工具**默认就按源分类镜像**，不需要额外操作：
+
+| 源里的位置 | 目标里的位置（默认） |
+|---|---|
+| `…\Assets\rome_items\a_geo.tpac` | `<目标模块>\Assets\rome_items\a_geo.tpac` |
+| `…\Assets\levant_items\b_geo.tpac` | `<目标模块>\Assets\levant_items\b_geo.tpac` |
+| `…\AssetPackages\pack0.tpac` | `<目标模块>\AssetPackages\pack0.tpac` |
+
+如果想把**所有**包强制收进同一个子文件夹（比如把散在各处的都归到 `rome_items`），
+在界面的「子文件夹」框里填名字即可，命令行用 `--subdir`：
+
+| 你填的 | 实际落点 | 说明 |
+|---|---|---|
+| `rome_items` | `<目标模块>\Assets\rome_items\` | 自动补上 `Assets\` 前缀 |
+| `Assets\rome_items` | `<目标模块>\Assets\rome_items\` | 写全了就不重复加 |
+| `rome_items\heavy` | `<目标模块>\Assets\rome_items\heavy\` | 嵌套路径也支持 |
+| `AssetPackages` | `<目标模块>\AssetPackages\` | 认作资源根，不再套一层 `Assets\` |
+| *（留空）* | 按源分类镜像 | 默认行为 |
+
+填了子文件夹后，它**优先于**「按源分类」勾选——所有包都归到那一个目录下。
+
+### 目标目录选深了也不会出错
+
+引擎只预载 `Assets\` / `AssetPackages\` 下的**第一层**子文件夹，所以再拼一次
+`Assets\` 就会得到 `Assets\Assets\rome_items\`，里面的包一个都加载不到。工具会把目标目录
+**归一化到模块根**再拼接：你把目标选到 `<模块>\`、`<模块>\Assets\`、
+甚至 `<模块>\Assets\rome_items\`，算出来的结果都一样正确。
 
 ## 运行环境
 
@@ -144,22 +206,31 @@ python migrator.py --source "E:\...\Modules\MercenaryVariety\Assets" ^
 ```
 
 常用参数：`--from <源模块名>`、`--rule "旧串=新串"`、`--on-conflict rename|overwrite|skip`、
-`--dry-run`、`--no-backup`、`--keep-relative`（还原源模块内的相对目录结构，**默认关闭**；
-默认行为是文件直投目标目录，不会再拼出 `Assets\Assets\` 这类嵌套）、
-`--rollback`（撤销上次迁移）、`--lang zh|en`。
+`--dry-run`、`--no-backup`、`--subdir rome_items`（把所有包归进 `Assets/rome_items/`，
+**优先于** `--keep-relative`）、`--flat`（拍平到模块根，不保留分类）、
+`--deep-scan`（深度扫描 segment，**默认关闭**，见下文"大包为什么不再爆内存"）、
+`--rollback`（撤销上次迁移）、`--lang zh|en|ja`。
 
-`--dry-run` 会把每个包的 tpac 落点**和缓存落点**都列出来，输出形如：
+> 落点**默认按源分类镜像**（和界面一致）：源里 `Assets/rome_items/a.tpac` 就落到目标
+> `Assets/rome_items/a.tpac`。`--keep-relative` 现在只是兼容旧命令的写法，写了也不报错。
+> 想拍平就用 `--flat`。
+
+`--dry-run` 会先打印落点规则，再把每个包的 tpac 落点**和缓存落点**都列出来，输出形如：
 
 ```
-  ...\vaegir_items\vaegir_lord_helm_geo.tpac -> ...\Modules\MyMod\vaegir_lord_helm_geo.tpac
+  落点：按源分类镜像 —— 源里的 Assets/rome_items/ 会落到目标 Assets/rome_items/
+  ...\vaegir_items\vaegir_lord_helm_geo.tpac -> ...\Modules\MyMod\Assets\vaegir_items\vaegir_lord_helm_geo.tpac
       缓存 0566A1FC-A449-4DAD-9443-1D54BE030C9E.rdc  ->  ...\Modules\MyMod\RuntimeDataCache\0566A1FC-....rdc
+  ...\AssetPackages\pack0.tpac -> ...\Modules\MyMod\AssetPackages\pack0.tpac
+      缓存：不需要（AssetPackages 打包文件自带全部数据）
 ```
 
-缓存不受 `--flat` / `--keep-relative` 影响，**永远落在目标模块根目录下**。
+缓存不受 `--flat` / `--keep-relative` / `--subdir` 影响，**永远落在目标模块根目录下**；
+打包文件（`AssetPackages/*.tpac`）则本来就**没有**缓存要搬。
 
 ### 界面语言
 
-右上角可切换 **中文 / English**，选择会存进 `ui_config.json`，下次启动自动沿用。
+右上角可切换 **中文 / English / 日本語**，选择会存进 `ui_config.json`，下次启动自动沿用。
 
 切换范围覆盖三层，不只是按钮文字：
 
@@ -167,7 +238,7 @@ python migrator.py --source "E:\...\Modules\MercenaryVariety\Assets" ^
 - 迁移过程日志与警告
 - 解析 / 重建的报错信息
 
-命令行可单独指定：`python migrator_gui.py --lang en`、`python migrator.py --lang en`。
+命令行可单独指定：`python migrator_gui.py --lang en`、`python migrator.py --lang ja`。
 首次运行没有记录时，按 Windows 界面语言自动选（中文系统默认中文）。
 
 ## 改写的安全策略
@@ -185,6 +256,35 @@ tpac 是二进制容器，乱改长度会直接损坏文件。工具按保守程
 未改写的资源段会**连压缩字节一起原样搬运**，不做多余的解压/重压，
 改动面被压到最小，上百 MB 的包也能处理（分段流式读写，不会把整个文件读进内存）。
 
+### 大包（几百 MB ~ 几 GB）为什么不再爆内存
+
+曾经有个坑：迁移 2.8 GB 的 `core_game.tpac` 时，进程峰值内存会飙到 **4.6 GB**。
+
+实测下来是**两个互相独立的原因**，只修一个都不够：
+
+1. **写盘后的结构自检**：它逐个段解压、核对"解压长度对不对"，而取数据用的 `get_data()`
+   会把解压结果**永久缓存**在段对象里——于是 23109 个段一起留在内存，等于把整个包解压后揣着不放。
+2. **段扫描（深度扫描）**：为了"万一路径藏在资源段里"，它会把每个 ≤4 MB 的段解压一遍，
+   同样驻留内存。
+
+同一台机器、同一个文件的四组对照（改写数始终是 2010，说明修内存没有改变行为）：
+
+| 配置 | 峰值内存 | 耗时 |
+|---|---|---|
+| 段扫描**开** + 旧自检 | 4467 MB | — |
+| 段扫描**关** + 旧自检 | 4609 MB | 212 s |
+| 段扫描**开** + 新自检 | 4483 MB | 447 s |
+| **段扫描关 + 新自检（默认设置）** | **150 MB** | 239 s |
+
+看第 2、3 行就知道：**两个都得修**。修完后峰值只跟**单个最大段**有关、与包的段数无关，
+所以多大的包都吃得下。
+
+那为什么可以放心把**段扫描默认关掉**？因为实测扫与不扫，**改写结果完全一致（都是 2010 处）**
+——所有路径字符串本来就在 `metadata` 里，扫段一处都没多找到。关掉它既省 4.3 GB 内存、
+也省 200 多秒。万一遇到结构特殊的包，可在界面勾「深度扫描段」（命令行 `--deep-scan`）兜底。
+
+`core_game.tpac` 本身实测能正常迁完：5045 个条目、2010 处路径改写、产物重新解析条目数一致。
+
 `.rdc` 缓存则完全不解析、不改写，直接按字节复制。
 
 ### 缓存冲突怎么处理
@@ -200,29 +300,46 @@ tpac 是二进制容器，乱改长度会直接损坏文件。工具按保守程
 
 格式实现与迁移链路都经过真实文件校验，不是纸上推演：
 
-- **字节级 round-trip**：解析 25 个真实 tpac（含 137 MB 的包）后原样重建，
+- **字节级 round-trip**：解析 26 个真实 tpac（含 137 MB 的包）后原样重建，
   与原始文件**逐字节完全一致**。这证明容器布局的理解没有偏差。
 - **迁移端到端**：真实迁移 40 个资源包，40/40 成功，产物可重新解析、条目数一致、
   段数据可正常解压，路径已改写为目标模块；同时 **32 个缓存随包复制、8 个材质包正确识别为无缓存、0 失败**。
 - **缓存专项回归**（`tests/test_cache.py`）：文件名推导（.NET GUID 字节序 + 大小写 + 扩展名）、
   源模块内定位、目标落点固定在模块根、真实模块命中规律、端到端搬运与重复迁移去重。
+- **缓存完整性回归**（`tests/test_audit.py`）：`cache_audit` 的基础判定、目标侧校验、
+  `run_batch` 的"同时构建校验"路径、`needs_runtime_cache` 的四类判定。
+- **落点专项回归**（`tests/test_paths.py`）：源分类镜像、子目录强制落点（裸名 / 带 `Assets\` 前缀 /
+  `AssetPackages` / 嵌套路径）、留空不改变默认行为、目标目录选深到 `Assets\` 或更深时的归一化
+  （确认**不会**拼出 `Assets\Assets\`）——7 组新用例，全部通过。
+- **大包实测**：2.8 GB 的 `AssetPackages/core_game.tpac`（23109 段、5045 条目）迁移成功，
+  2010 处路径改写；**峰值内存 4.6 GB → 150 MB**（段扫描与写盘自检两处都修之后，四组对照见上文）。
+  另有 130 MB 的 `gauntlet_ui.tpac`、62 MB 的 `pack0.tpac` 等一并验过。
+- **自检流式行为回归**（`tests/test_verify.py`）：合成包 + 真实包双路验证——段数统计正确、
+  段长不符会带资源名报错、且**校验结束后没有任何段残留解压数据**（内存恒定的结构性保证）。
+- **打包文件识别**：扫遍 244 个 `AssetPackages/*.tpac`，**243 个头部 GUID 是同一个固定值**，
+  据此确认"把包格式 GUID 当资源 GUID 找缓存"是误报根源，现已改为识别为「自包含」。
+- **i18n 自检**（`tests/test_i18n.py`）：191 条文案 × 3 语言（中/英/日）键与占位符一一对应，
+  语言探测 8 组用例全部通过。
 - **回滚**：撤销一次 18 个文件的迁移（10 个 tpac + 8 个缓存），全部清理干净。
 
 ## 目录结构
 
 ```
 霸主tpac迁移工具/
-  tpac_core.py       容器读写 / LZ4 / 依赖图 / 重映射引擎 / 缓存文件名推导
-  migrator.py        迁移执行层（发现、规则建议、冲突、备份、缓存搬运、回滚、命令行）
-  migrator_gui.py    图形界面（中英文切换）
-  i18n.py            中英文文案表（界面 / 日志 / 报错）
+  tpac_core.py       容器读写 / LZ4 / 依赖图 / 重映射引擎 / 缓存文件名推导 / 打包文件识别 / 流式自检
+  migrator.py        迁移执行层（发现、规则建议、冲突、备份、缓存搬运、落点、回滚、命令行）
+  migrator_gui.py    图形界面（中英日切换）
+  i18n.py            中英日文案表（界面 / 日志 / 报错，共 191 条）
   启动迁移工具.bat    一键启动
   ui_config.json     记住的语言选择（首次运行后生成）
+  README.md / README_EN.md / README_JA.md   中 / 英 / 日三语说明
   tests/
     test_roundtrip.py  字节级 round-trip 校验
     test_remap.py      真实文件迁移端到端校验
-    test_paths.py      模块根定位 / 目标路径 / 文件夹名与 Id 一致性
+    test_paths.py      模块根定位 / 目标路径 / 子目录落点 / 文件夹名与 Id 一致性
     test_cache.py      运行时缓存定位与搬运校验
+    test_audit.py      缓存完整性审计（含打包文件排除）
+    test_verify.py     写盘后自检的流式行为（不许把所有段留在内存里）
     test_i18n.py       语言表自检（缺译 / 占位符不一致）
 ```
 
@@ -232,6 +349,8 @@ tpac 是二进制容器，乱改长度会直接损坏文件。工具按保守程
 python tests\test_i18n.py
 python tests\test_paths.py
 python tests\test_cache.py
+python tests\test_audit.py
+python tests\test_verify.py
 python tests\test_roundtrip.py
 python tests\test_remap.py
 ```
@@ -277,6 +396,11 @@ pyinstaller --noconfirm --onefile --windowed --name 霸主tpac迁移工具 migra
 
 其中头部的 **package guid**（偏移 8~24）同时决定运行时缓存的文件名：
 按 .NET Guid 文本格式（前三段小端）大写输出，加 `.rdc` 扩展名。
+
+> **注意一个例外**：这个字段在**单资源包**（`Assets/<子目录>/xxx.tpac`）里确实是资源 GUID，
+> 但在**打包文件**（`AssetPackages/xxx.tpac`）里是**包格式 GUID**（实测 244 个里 243 个都是
+> `807E3D8D-E501-499B-A1D3-22AE3F4E64F3`）。打包文件自包含、本来就没有对应缓存，所以不能用它
+> 去 `RuntimeDataCache/` 找 `.rdc`——工具靠这个特征识别「自包含」包。
 
 工具自带纯 Python 的 LZ4 block 解码，无需安装任何第三方库；
 若环境里装了 `lz4`，重新压缩时会用它，装了更快、没装也能正常工作。

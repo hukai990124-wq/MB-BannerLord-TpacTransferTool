@@ -62,6 +62,37 @@ Two rules worth remembering:
 - **Material packages (`*_mtl.tpac`) never have a cache**, and the tool skips them without
   complaining. Of the 62 packages in MCV, 50 have a cache and 12 materials do not — no exceptions.
 
+### Bundled packages (`AssetPackages/*.tpac`) are self-contained
+
+Packages under `AssetPackages/` (and `EmAssetPackages/`) are **not the same thing** as the
+single-asset packages under `Assets/`:
+
+| | `Assets/<subfolder>/xxx.tpac` | `AssetPackages/xxx.tpac` |
+|---|---|---|
+| Holds | **one** asset (a mesh / material / texture) | **many** assets, with the data inside |
+| Header GUID is | **that asset's GUID** (= the cache file name) | a **format GUID** (one fixed value) |
+| Needs a separate `.rdc` cache | yes | **no** — the data is in the package |
+
+The header GUID of a bundled package is in fact constant — across 244 bundled packages scanned,
+**243 share the same value** `807E3D8D-E501-499B-A1D3-22AE3F4E64F3`. Older builds treated it as an
+asset GUID, went looking for a cache in `RuntimeDataCache/`, found nothing, and flagged every large
+package red as "cache missing" — a false alarm. The tool now recognises these packages: the Cache
+column shows **"self-contained"**, no red, and they are excluded from the completeness statistics.
+
+### The truth about `RuntimeDataCache/`
+
+It is **not** something shipped with a mod — it is a by-product the Bannerlord editor generates
+**when you bake assets on your own machine**. Scanning an entire install: only 3 modules had a
+`RuntimeDataCache/` (all of them development machines where the editor had been used); the official
+**Native / SandBox / NavalDLC modules and every mod downloaded from the internet have none**.
+Consequently:
+
+- When migrating someone else's mod there is simply no cache to bring — **that is normal, not a failure**;
+- A missing cache does not have to mean a blank model — on first load the engine **bakes it itself**
+  from the `AssetSources/<...>/xxx.png` pointer in the package `metadata`, *provided those source
+  files exist*. Only "no cache **and** no source files" is genuinely broken.
+- So "cache missing in the source" is only a **hint**; the tool never blocks a migration over it.
+
 ### What you do *not* need to move: AssetSources
 
 `AssetSources/` holds the **artist source files** (fbx, psd, …) used by the Bannerlord editor when
@@ -80,9 +111,14 @@ Moving the cache is not the whole story — the tool runs a **"is everything tha
 
 The rule is simple:
 
-- **Should have a cache** — every non-material package
-- **No cache needed** — material packages (only `Material` type)
+- **No cache needed — material** — material packages (only `Material` type)
+- **No cache needed — self-contained** — bundled files under `AssetPackages/` /
+  `EmAssetPackages/` (see the previous section), or any header GUID matching a known format GUID
+- **Should have a cache** — all remaining single-asset packages
 - **Missing** — should have a cache but the source module has no matching `.rdc` — flagged red
+
+> Both "no cache needed" categories are **excluded from the denominator** of the completeness
+> statistics, so large packages no longer paint the numbers red.
 
 Why not block? Because empirically, on first load the engine **re-bakes** a missing cache itself, by
 reading the `metadata` pointer inside the package back to the source file in `AssetSources/<...>/xxx.png`
@@ -102,6 +138,39 @@ Target module check: all 7 caches in place
 - Source missing but target present (engine already baked it earlier) → nothing to worry about
 - Source missing *and* target missing → first in-game load will pause a few seconds for the engine to bake it
 - **Target** side missing after migration (write failed / disk full) → real problem; check the error log above
+
+## Destinations: which subfolder does a package land in?
+
+Modders usually group assets by category (`rome_items` / `levant_items` / `vaegir_items` …) to keep
+things manageable in the editor. The tool **mirrors the source layout by default**, so nothing extra
+is required:
+
+| Source location | Destination (default) |
+|---|---|
+| `…\Assets\rome_items\a_geo.tpac` | `<target module>\Assets\rome_items\a_geo.tpac` |
+| `…\Assets\levant_items\b_geo.tpac` | `<target module>\Assets\levant_items\b_geo.tpac` |
+| `…\AssetPackages\pack0.tpac` | `<target module>\AssetPackages\pack0.tpac` |
+
+To force **every** package into one subfolder instead (say, gathering scattered packages into
+`rome_items`), type the name into the **Subfolder** box in the GUI, or use `--subdir` on the CLI:
+
+| You type | Actual destination | Notes |
+|---|---|---|
+| `rome_items` | `<target module>\Assets\rome_items\` | `Assets\` is added automatically |
+| `Assets\rome_items` | `<target module>\Assets\rome_items\` | Fully qualified — no extra prefix |
+| `rome_items\heavy` | `<target module>\Assets\rome_items\heavy\` | Nested paths work too |
+| `AssetPackages` | `<target module>\AssetPackages\` | Recognised as a resource root, no extra `Assets\` |
+| *(empty)* | mirror the source | the default |
+
+When a subfolder is given it **takes precedence** over the *mirror the source* checkbox — all
+packages go into that one directory.
+
+### Choosing a target directory "too deep" is still safe
+
+The engine only preloads the **first-level** subfolders of `Assets\` / `AssetPackages\`, so appending
+another `Assets\` would produce `Assets\Assets\rome_items\` and none of those packages would load.
+The tool **normalises the target to the module root** before joining: whether you pick `<module>\`,
+`<module>\Assets\` or even `<module>\Assets\rome_items\`, the result is the same and correct.
 
 ## Requirements
 
@@ -141,6 +210,9 @@ python migrator.py --source "E:\...\Modules\MercenaryVariety\Assets" ^
    `Modules\`.
    - The target module name is inferred from the directory name; it determines what the paths are
      rewritten to.
+   - **Subfolder left empty** (recommended) = mirror the source, so `Assets/rome_items/` in the
+     source lands in `Assets/rome_items/` in the target. **Fill it in** (e.g. `rome_items`) to force
+     every package into `Assets/rome_items/` — handy for organising things in the editor.
 
 > ⚠️ **One thing to check before you start: the target module's folder name must equal the `<Id>`
 > declared in its `SubModule.xml`.** The `$BASE/Modules/〈name〉/AssetSources/…` strings baked into
@@ -152,9 +224,12 @@ python migrator.py --source "E:\...\Modules\MercenaryVariety\Assets" ^
 2. **Scan** — lists every `.tpac`, its item count, content breakdown, number of external
    dependencies, and a **Cache** column. All rows are selected by default; use the first column to
    toggle.
-   - `✓ 6.0 MB` means the source module's `RuntimeDataCache/` holds the matching `.rdc` and it will
-     be moved along. `—` means there is none in the source (**material packages never have one —
-     that is normal**).
+   - The **Cache** column has **four** states:
+     - `✓ 6.0 MB` — the source module's `RuntimeDataCache/` holds the matching `.rdc`; it is moved along
+     - `— material` — material packages never have one; normal
+     - `— self-contained` — an `AssetPackages/` bundle whose data is inside the package; no cache needed
+     - `missing` (**whole row red**) — it should have one but none was found; a hint only, it
+       **does not block** the migration
 3. **Path re-mapping rules** — after scanning, rules are **suggested from the paths that actually
    occur inside the packages** (not guessed). You can add, edit or delete them by hand.
 4. **Options** — it is recommended to keep *back up before overwrite* and *verify structure after
@@ -179,23 +254,32 @@ python migrator.py --source "E:\...\Modules\MercenaryVariety\Assets" ^
 
 Common flags: `--from <source module name>`, `--rule "old=new"`,
 `--on-conflict rename|overwrite|skip`, `--dry-run`, `--no-backup`,
-`--keep-relative` (rebuild the source-relative folder tree; **off by default** — the default
-drops files straight into the target dir and never produces nested `Assets\Assets\` paths),
-`--rollback` (undo the last migration), `--lang zh|en`.
+`--subdir rome_items` (put every package under `Assets/rome_items/`; **overrides**
+`--keep-relative`), `--flat` (drop files into the module root, no categories),
+`--deep-scan` (scan segments deeply; **off by default** — see "Why large packages no longer
+exhaust memory" below), `--rollback` (undo the last migration), `--lang zh|en|ja`.
 
-`--dry-run` prints both the `.tpac` destination and the cache destination for each package:
+> Destinations **mirror the source by default** (same as the GUI): `Assets/rome_items/a.tpac` in the
+> source lands at `Assets/rome_items/a.tpac` in the target. `--keep-relative` is now only a
+> compatibility spelling and is accepted without error. Use `--flat` to flatten.
+
+`--dry-run` first prints the layout rule, then both the `.tpac` and the cache destination for each
+package:
 
 ```
-  ...\vaegir_items\vaegir_lord_helm_geo.tpac -> ...\Modules\MyMod\vaegir_lord_helm_geo.tpac
+  Layout: mirror the source — Assets/rome_items/ lands at the target's Assets/rome_items/
+  ...\vaegir_items\vaegir_lord_helm_geo.tpac -> ...\Modules\MyMod\Assets\vaegir_items\vaegir_lord_helm_geo.tpac
       cache 0566A1FC-A449-4DAD-9443-1D54BE030C9E.rdc  ->  ...\Modules\MyMod\RuntimeDataCache\0566A1FC-....rdc
+  ...\AssetPackages\pack0.tpac -> ...\Modules\MyMod\AssetPackages\pack0.tpac
+      cache: not needed (self-contained AssetPackages bundle)
 ```
 
-The cache is unaffected by `--flat` / `--keep-relative`; it **always lands at the target module
-root**.
+The cache is unaffected by `--flat` / `--keep-relative` / `--subdir`; it **always lands at the
+target module root**. Bundled packages (`AssetPackages/*.tpac`) simply have **no** cache to move.
 
 ### Interface language
 
-The UI has a **中文 / English** switcher in the top-right corner; the choice is saved to
+The UI has a **中文 / English / 日本語** switcher in the top-right corner; the choice is saved to
 `ui_config.json` and reused on the next launch.
 
 Translation covers three layers, not just button captions:
@@ -205,7 +289,7 @@ Translation covers three layers, not just button captions:
 - Parse / rebuild error messages
 
 The CLI can override it per run: `python migrator_gui.py --lang en`,
-`python migrator.py --lang en`. With no saved preference, the language is inferred from the
+`python migrator.py --lang ja`. With no saved preference, the language is inferred from the
 Windows UI language.
 
 ## How rewriting stays safe
@@ -227,6 +311,42 @@ no needless decompress/recompress — keeping the change surface minimal. Packag
 size are fine: reading and writing are chunked and streaming, so the whole file is never loaded
 into memory.
 
+### Why large packages (hundreds of MB to several GB) no longer exhaust memory
+
+There used to be a trap: migrating the 2.8 GB `core_game.tpac` drove the process peak working set to
+**4.6 GB**.
+
+Measurement showed **two independent causes** — fixing only one of them is not enough:
+
+1. **The post-write structural self-check** decompresses every segment to verify the decompressed
+   length, and the accessor `get_data()` **caches the decompressed bytes permanently** on the
+   segment object — so all 23,109 segments stayed in memory at once, effectively holding the whole
+   unpacked package.
+2. **Segment scanning (deep scan)** — the "just in case the paths are hidden in a resource segment"
+   precaution — decompresses every segment ≤4 MB and keeps those resident too.
+
+Four runs on the same machine and the same file (rewrites were 2010 every time, so none of this
+changed behaviour):
+
+| Configuration | Peak memory | Time |
+|---|---|---|
+| Segment scan **on** + old self-check | 4467 MB | — |
+| Segment scan **off** + old self-check | 4609 MB | 212 s |
+| Segment scan **on** + new self-check | 4483 MB | 447 s |
+| **Segment scan off + new self-check (defaults)** | **150 MB** | 239 s |
+
+Rows 2 and 3 make the point: **both had to be fixed.** The peak now depends only on the **single
+largest segment**, not on the number of segments — so any package size fits.
+
+That is also why **segment scanning can safely be off by default**: measured on the same package,
+scanning and not scanning gave **identical results (2010 rewrites either way)** — all path strings
+live in `metadata`, so the segment scan found nothing extra. Turning it off saves 4.3 GB of memory
+and 200-odd seconds. If you ever hit a structurally unusual package, tick *deep-scan segments* in the
+GUI (CLI `--deep-scan`) as a fallback.
+
+That 2.8 GB `AssetPackages/core_game.tpac` migrates fine: 5045 items, 2010 path rewrites, about
+235 seconds, and the output re-parses with an identical item count.
+
 `.rdc` caches are never parsed or rewritten at all — they are copied byte for byte.
 
 ### How cache conflicts are handled
@@ -243,7 +363,7 @@ would be the same as not moving it). The tool therefore behaves like this:
 
 Both the format implementation and the migration pipeline are validated against real files:
 
-- **Byte-level round-trip** — 25 real `.tpac` packages (including a 137 MB one) were parsed and
+- **Byte-level round-trip** — 26 real `.tpac` packages (including a 137 MB one) were parsed and
   rebuilt unchanged, **byte-for-byte identical** to the originals. This proves the container layout
   is understood correctly.
 - **End-to-end migration** — 40 real packages migrated, 40/40 successful; the outputs re-parse,
@@ -253,23 +373,45 @@ Both the format implementation and the migration pipeline are validated against 
 - **Cache-specific regression** (`tests/test_cache.py`) — file-name derivation (.NET GUID byte
   order, casing, extension), lookup inside the source module, destination pinned to the module
   root, hit pattern across a real module, end-to-end copy plus de-duplication on re-runs.
+- **Cache-completeness regression** (`tests/test_audit.py`) — the base `cache_audit` decision, the
+  target-side check, the `run_batch` "build the audit alongside" path, and the four
+  `needs_runtime_cache` verdicts.
+- **Destination regression** (`tests/test_paths.py`) — mirroring, forced subfolder destinations (bare
+  name / `Assets\`-prefixed / `AssetPackages` / nested), empty input not changing the default, and
+  normalisation when the target is picked as deep as `Assets\` (confirming **no** `Assets\Assets\`
+  is ever produced). 7 new cases, all passing.
+- **Large-package measurement** — the 2.8 GB `AssetPackages/core_game.tpac` (23,109 segments,
+  5045 items) migrates successfully with 2010 rewrites; **peak memory went from 4.6 GB to 150 MB**
+  (after fixing *both* the segment scan and the post-write self-check — see the four-run matrix
+  above). Also verified on a 130 MB `gauntlet_ui.tpac` and a 62 MB `pack0.tpac`.
+- **Streaming self-check regression** (`tests/test_verify.py`) — synthetic and real packages both:
+  the segment count is right, a wrong segment length is reported with the asset name, and
+  **no segment data is left behind after verification** (the structural guarantee behind flat memory).
+- **Bundled-package recognition** — across 244 scanned `AssetPackages/*.tpac`, **243 share the same
+  fixed header GUID**, confirming that treating a format GUID as an asset GUID was the source of the
+  false "missing cache" reports. These are now recognised as *self-contained*.
+- **i18n self-check** (`tests/test_i18n.py`) — 191 messages × 3 languages (zh/en/ja) with matching
+  keys and placeholders, plus 8 language-detection cases.
 - **Rollback** — a migration of 18 files (10 `.tpac` + 8 caches) was reverted completely.
 
 ## Project layout
 
 ```
 霸主tpac迁移工具/
-  tpac_core.py       container read/write, LZ4, dependency graph, re-mapping engine, cache-name derivation
-  migrator.py        migration layer (discovery, rule suggestions, conflicts, backup, cache copying, rollback, CLI)
-  migrator_gui.py    graphical interface (zh/en switch)
-  i18n.py            zh/en message table (UI / log / errors)
+  tpac_core.py       container read/write, LZ4, dependency graph, re-mapping engine, cache-name derivation, bundled-package detection, streaming verify
+  migrator.py        migration layer (discovery, rule suggestions, conflicts, backup, cache copying, destinations, rollback, CLI)
+  migrator_gui.py    graphical interface (zh/en/ja switch)
+  i18n.py            zh/en/ja message table (UI / log / errors, 191 entries)
   启动迁移工具.bat    one-click launcher
   ui_config.json     remembered language choice (created on first run)
+  README.md / README_EN.md / README_JA.md   Chinese / English / Japanese docs
   tests/
     test_roundtrip.py  byte-level round-trip check
     test_remap.py      end-to-end migration check on real files
-    test_paths.py      module root / target path / folder-name-vs-Id consistency
+    test_paths.py      module root / target path / subfolder destination / folder-name-vs-Id consistency
     test_cache.py      runtime cache lookup and copying
+    test_audit.py      cache-completeness audit (bundled packages excluded)
+    test_verify.py     streaming behaviour of the post-write self-check (no segment data may be retained)
     test_i18n.py       message-table check (missing translations / placeholder mismatch)
 ```
 
@@ -279,6 +421,8 @@ Run the checks yourself:
 python tests\test_i18n.py
 python tests\test_paths.py
 python tests\test_cache.py
+python tests\test_audit.py
+python tests\test_verify.py
 python tests\test_roundtrip.py
 python tests\test_remap.py
 ```
@@ -333,6 +477,12 @@ Storage format:  0 = raw, 1 = LZ4-HC
 The **package guid** in the header (bytes 8–24) also determines the runtime cache file name: it is
 rendered in .NET Guid text form (first three groups little-endian), uppercased, with a `.rdc`
 extension.
+
+> **One exception**: in a **single-asset package** (`Assets/<subfolder>/xxx.tpac`) this field really
+> is the asset GUID, but in a **bundled file** (`AssetPackages/xxx.tpac`) it is a **package format
+> GUID** (measured: 243 out of 244 share `807E3D8D-E501-499B-A1D3-22AE3F4E64F3`). Bundled files are
+> self-contained and have no corresponding cache, so this field must not be used to look one up in
+> `RuntimeDataCache/` — which is exactly the trait the tool uses to recognise them.
 
 The tool ships a pure-Python LZ4 block decoder, so no third-party library is needed; if `lz4` is
 installed it is used when re-compressing — faster with it, fully functional without it.
