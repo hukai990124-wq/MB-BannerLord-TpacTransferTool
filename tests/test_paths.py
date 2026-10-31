@@ -16,7 +16,8 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from migrator import (  # noqa: E402
-    compute_target_path, module_folder_name, module_root_of, name_alignment,
+    compute_target_path, layout_target_dir, module_folder_name, module_root_of,
+    name_alignment,
 )
 
 TARGET = r"E:\SteamLibrary\steamapps\common\Mount & Blade II Bannerlord\Modules\test_transe"
@@ -135,6 +136,59 @@ def main() -> int:
         if module_folder_name(os.path.join(tmp, "Lone")) != "Lone":
             print("    !! 无 SubModule.xml 时应退化成文件夹名")
             failures += 1
+
+        # --- 落点：指定子文件夹（做 mod 按 rome_items / levant_items 分类）---
+        # 背景：用户要求"能迁进小文件夹"，而不是全拍平或只能到模块根。
+        # 规则：填了子目录 -> 全部归到 <模块根>/Assets/<子目录>/，
+        #       此时一律覆盖 keep_relative（子目录优先级最高）。
+        def check(tag: str, got: str, want: str) -> None:
+            nonlocal failures
+            print(tag)
+            print("    期望: %s" % norm(want))
+            print("    实际: %s" % norm(got))
+            if norm(got) != norm(want):
+                print("    !! 落点不对")
+                failures += 1
+
+        check("[8] 子目录填裸名 -> 自动挂到 Assets/ 下",
+              compute_target_path(src, TARGET, True, "rome_items"),
+              os.path.join(TARGET, "Assets", "rome_items", "a_geo.tpac"))
+
+        check("[9] 子目录写明 Assets/xxxx -> 不重复加前缀",
+              compute_target_path(src, TARGET, True, "Assets/levant_items"),
+              os.path.join(TARGET, "Assets", "levant_items", "a_geo.tpac"))
+
+        check("[10] 子目录写 AssetPackages -> 认作资源根，不再套 Assets/",
+              compute_target_path(src, TARGET, True, "AssetPackages"),
+              os.path.join(TARGET, "AssetPackages", "a_geo.tpac"))
+
+        check("[11] 子目录写嵌套路径 a/b 也应成立",
+              compute_target_path(src, TARGET, True, "rome_items/heavy"),
+              os.path.join(TARGET, "Assets", "rome_items", "heavy", "a_geo.tpac"))
+
+        print("[12] 子目录为空/空白时不应改变默认行为")
+        if norm(compute_target_path(src, TARGET, True, "")) != \
+                norm(compute_target_path(src, TARGET, True)):
+            print("    !! 空串改变了默认落点")
+            failures += 1
+        if layout_target_dir(TARGET, "   ") != "":
+            print("    !! 空白串应被视作未指定，实际 %r"
+                  % layout_target_dir(TARGET, "   "))
+            failures += 1
+
+        # --- 目标目录选得过深：必须归一化到模块根 ---
+        # 实测踩过：目标选到 ...\Modules\test_transe\Assets 时，再拼一次
+        # Assets/ 就得到 Assets\Assets\rome_items\，引擎扫不到。
+        check("[13] 目标选到 模块根\\Assets + 子目录 -> 不出现双层 Assets",
+              compute_target_path(src, os.path.join(TARGET, "Assets"), True,
+                                  "rome_items"),
+              os.path.join(TARGET, "Assets", "rome_items", "a_geo.tpac"))
+
+        check("[14] 目标选到 模块根\\Assets\\x + 镜像模式 -> 也归一到模块根",
+              compute_target_path(src, os.path.join(TARGET, "Assets", "grp"),
+                                  True),
+              os.path.join(TARGET, "Assets", "grp", "a_geo.tpac"))
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

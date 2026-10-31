@@ -53,8 +53,8 @@ from i18n import LANGS, get_lang, init_lang, save_lang, set_lang, tr
 from tpac_core import MappingRule, PackageReport, scan_package
 from migrator import (
     MigrateOptions, attach_cache_info, compute_target_path, discover_tpac,
-    module_folder_name, module_root_of, name_alignment, rollback, run_batch,
-    suggest_rules,
+    layout_target_dir, module_folder_name, module_root_of, name_alignment,
+    rollback, run_batch, suggest_rules,
 )
 
 # --------------------------------------------------------------------------
@@ -77,7 +77,16 @@ FONT_MONO = ("Consolas", 9)
 GAME_DIR_NAME = "Mount & Blade II Bannerlord"
 
 # 语言下拉里显示的是语言本身的名称（中文 / English），不随界面语言变化
-LANG_LABELS = ("中文", "English")
+LANG_LABELS = ("中文", "English", "日本語")
+
+
+def _next_demo_lang(current: str) -> str:
+    """自检里"切到下一门语言"的辅助：zh → en → ja → zh 循环。"""
+    order = ("zh", "en", "ja")
+    if current not in order:
+        return "zh"
+    return order[(order.index(current) + 1) % len(order)]
+
 
 CHECKED = "☑"
 UNCHECKED = "☐"
@@ -202,7 +211,9 @@ class App(tk.Tk):
         self._txt("app.lang", ttk.Label(lang_box, style="Dim.TLabel")).pack(side="left")
         self.lang_combo = ttk.Combobox(lang_box, width=9, state="readonly",
                                        values=LANG_LABELS)
-        self.lang_combo.set(LANG_LABELS[0] if get_lang() == "zh" else LANG_LABELS[1])
+        code = get_lang()
+        self.lang_combo.set(LANG_LABELS[LANGS.index(code)]
+                            if code in LANGS else LANG_LABELS[0])
         self.lang_combo.pack(side="left", padx=(4, 0))
         self.lang_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_lang_change())
 
@@ -240,6 +251,15 @@ class App(tk.Tk):
         self.target_entry.pack(side="left", fill="x", expand=True, padx=8)
         self._txt("btn.browse",
                   ttk.Button(dst_row, command=self._browse_target)).pack(side="left")
+
+        # 子文件夹：留空 = 按源分类镜像（rome_items -> Assets/rome_items/）；
+        # 填了就把所有包强制归到 Assets/<填的这个>/ —— 做 mod 分门别类时用。
+        sub_row = ttk.Frame(self)
+        sub_row.pack(fill="x", padx=14, pady=(6, 0))
+        self._txt("lbl.subdir", ttk.Label(sub_row)).pack(side="left")
+        self.subdir_var = tk.StringVar()
+        ttk.Entry(sub_row, textvariable=self.subdir_var, width=24).pack(side="left", padx=8)
+        self._txt("lbl.subdir_hint", ttk.Label(sub_row, style="Dim.TLabel")).pack(side="left")
 
         mod_row = ttk.Frame(self)
         mod_row.pack(fill="x", padx=14, pady=(6, 0))
@@ -325,9 +345,14 @@ class App(tk.Tk):
         opt = ttk.Frame(self)
         opt.pack(fill="x", padx=14)
         self.backup_var = tk.BooleanVar(value=True)
-        # 默认不还原源目录结构：你选的目录就是文件落点，避免拼出 Assets\Assets\ 这类嵌套
-        self.relative_var = tk.BooleanVar(value=False)
+        # 默认**按源分类镜像**：做 mod 时源里通常已按 rome_items / levant_items 分好类，
+        # 镜像过去正好方便在编辑器里管理。目标目录会被归一化到模块根，所以不会再
+        # 拼出 Assets\Assets\ 那种双层嵌套（之前默认关+不归一化，实测踩过）。
+        self.relative_var = tk.BooleanVar(value=True)
         self.verify_var = tk.BooleanVar(value=True)
+        # 默认不深度扫描：路径字符串实测全在 metadata 里，扫 segment 一处都多找不到，
+        # 却会让 2.8 GB 的包内存涨到 4.5 GB。
+        self.deep_scan_var = tk.BooleanVar(value=False)
         self.conflict_var = tk.StringVar(value="rename")
         self._txt("chk.backup",
                   ttk.Checkbutton(opt, variable=self.backup_var)).pack(side="left")
@@ -335,6 +360,8 @@ class App(tk.Tk):
                   ttk.Checkbutton(opt, variable=self.relative_var)).pack(side="left", padx=12)
         self._txt("chk.verify",
                   ttk.Checkbutton(opt, variable=self.verify_var)).pack(side="left")
+        self._txt("chk.deep_scan",
+                  ttk.Checkbutton(opt, variable=self.deep_scan_var)).pack(side="left", padx=12)
         self._txt("lbl.conflict", ttk.Label(opt)).pack(side="left", padx=(16, 4))
         ttk.Combobox(opt, textvariable=self.conflict_var, width=10, state="readonly",
                      values=("rename", "overwrite", "skip")).pack(side="left")
@@ -365,7 +392,9 @@ class App(tk.Tk):
     # -- 语言 ------------------------------------------------------------
     def _on_lang_change(self) -> None:
         label = self.lang_combo.get()
-        code = "zh" if label == LANG_LABELS[0] else "en"
+        if label not in LANG_LABELS:
+            return
+        code = LANGS[LANG_LABELS.index(label)]
         if code == get_lang():
             return
         self._set_lang(code)
@@ -375,8 +404,8 @@ class App(tk.Tk):
         if not self.smoke:
             save_lang(code)      # 自检只是演练，不该动用户的语言设置
         self._retranslate()
-        self._log(tr("log.lang_switched", name=LANG_LABELS[0] if code == "zh"
-                     else LANG_LABELS[1]), "ok")
+        name = LANG_LABELS[LANGS.index(code)] if code in LANGS else code
+        self._log(tr("log.lang_switched", name=name), "ok")
 
     def _retranslate(self) -> None:
         """切换语言后刷新全部界面文字。"""
@@ -692,11 +721,27 @@ class App(tk.Tk):
     def _migrate_options(self) -> MigrateOptions:
         return MigrateOptions(
             target_module=self.module_var.get().strip(),
+            target_subdir=self.subdir_var.get().strip(),
             on_conflict=self.conflict_var.get(),
             backup=self.backup_var.get(),
             keep_relative=self.relative_var.get(),
             verify=self.verify_var.get(),
+            scan_segments=self.deep_scan_var.get(),
         )
+
+    def _log_layout(self, subdir: str) -> None:
+        """把最终落点规则写进日志，让用户一眼看出分类是否正确。
+
+        三选一，与 `compute_target_path` 的优先级完全一致：
+        指定了子目录 > 按源分类镜像 > 平铺到模块根。
+        """
+        sub_dir = layout_target_dir(self.target_var.get().strip(), subdir)
+        if sub_dir:
+            self._log(tr("log.layout_subdir", dst=sub_dir), "dim")
+        elif self.relative_var.get():
+            self._log(tr("log.layout_mirror"), "dim")
+        else:
+            self._log(tr("log.layout_flat"), "dim")
 
     def _start(self, dry_run: bool) -> None:
         if self.busy:
@@ -737,13 +782,26 @@ class App(tk.Tk):
                 self._log(tr("log.no_rules"), "warn")
                 return
 
+        subdir = self.subdir_var.get().strip()
         if dry_run:
             self._log(tr("log.dry_header"), "dim")
+            self._log_layout(subdir)
             for path in selected[:50]:
-                dst = compute_target_path(path, target, self.relative_var.get())
+                dst = compute_target_path(path, target, self.relative_var.get(),
+                                          subdir)
                 self._log("  %s\n     -> %s" % (os.path.basename(path), dst))
             self._log(tr("log.dry_total", count=len(selected)), "ok")
             return
+
+        # 真迁移前先亮出落点，免得迁完才发现分类不对（用户最在意子文件夹归类）。
+        self._log(tr("log.plan_header"), "dim")
+        self._log_layout(subdir)
+        for path in selected[:20]:
+            dst = compute_target_path(path, target, self.relative_var.get(),
+                                      subdir)
+            self._log("  %s\n     -> %s" % (os.path.basename(path), dst))
+        if len(selected) > 20:
+            self._log(tr("log.plan_more", count=len(selected) - 20), "dim")
 
         self.busy = True
         self.run_btn.configure(state="disabled")
@@ -826,9 +884,13 @@ class App(tk.Tk):
         sep = tr("types.sep")
         types = sep.join("%s×%d" % (k, v) for k, v in
                          sorted(report.types.items(), key=lambda kv: -kv[1])[:3])
-        # 缓存列三态：有缓存 / 材质包无需 / 缺失
-        # 材质包没有缓存是正常的；只有"应带却没带"才标红（仍不阻断）。
-        if not report.cache_expected:
+        # 缓存列四态：有缓存 / 材质包无需 / 打包文件自包含 / 缺失（标红）
+        # 材质包没有缓存是正常的；打包文件（AssetPackages/*.tpac）自带全部资源、
+        # 也不依赖 RuntimeDataCache。只有"应带却没带"才标红（仍不阻断）。
+        if report.bundled:
+            cache = CACHE_MISS + " " + tr("col.cache_bundled")
+            row_tag = ""
+        elif not report.cache_expected:
             cache = CACHE_MISS + " " + tr("col.cache_material")
             row_tag = ""
         elif report.cache_path:
@@ -914,7 +976,7 @@ class App(tk.Tk):
         self.after(100, self._start_scan)
         # 迁移前先切到另一门语言，顺便验证切换不会打断流程
         self.after(4000, lambda: (
-            self._set_lang("en" if get_lang() == "zh" else "zh"),
+            self._set_lang(_next_demo_lang(get_lang())),
             self._log(tr("smoke.start"), "dim"),
             self._start(False)))
         self.after(20000, self._smoke_finish)

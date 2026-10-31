@@ -76,15 +76,31 @@ ZERO_GUID = b"\x00" * 16
 
 # 运行时缓存（RuntimeDataCache）
 #
-# 引擎把资源包对应的网格 / 贴图**真实数据**缓存在模块根目录下的
-# `RuntimeDataCache/<GUID>.rdc`，包内只有引用、没有像素。文件名 GUID 就是下面这个
-# "package guid"（头部第 8~24 字节）。只搬 .tpac 而不搬这个目录，结果是：装备在
-# 游戏里能买到、能装备，引擎日志里也有渲染请求，但模型一片空白，且一句报错都没有
-# —— 实测栽过这个跟头，所以迁移时必须一起搬。
+# `RuntimeDataCache/<GUID>.rdc` 存放资源包对应的网格 / 贴图数据。**注意它只在
+# "用编辑器烘焙过资源"的机器上存在**——实测全库只有 3 个模块有这个目录
+# （MercenaryVariety / MajesticCollection / KotK_GT_CarbonBody），三者都带
+# `AssetSources/`；官方 Native / SandBox / NavalDLC 以及所有下载来的 mod 都没有。
+# 所以"源模块里找不到 rdc"是常见现象，不等于出错。
+#
+# 迁移时**有就顺手带上**（目标机省去首次加载的烘焙），没有也不必拦。
 #
 # 注意：材质包（`*_mtl.tpac`）天生没有运行时缓存，"找不到"是正常现象而非错误。
 CACHE_DIR_NAME = "RuntimeDataCache"
 CACHE_EXT = ".rdc"
+
+# 两种 tpac 的组织方式，头部第 8~24 字节的含义完全不同：
+#
+#   * 单资源包（`Assets/<分类>/xxx.tpac`）——每包一个资源 GUID，**它正是 rdc 文件名**
+#   * 打包文件（`AssetPackages/xxx.tpac`）——多资源打在一起、数据自包含；
+#     实测 244 个打包文件里 243 个的该字段是**同一个固定值**，那是"包格式 GUID"，
+#     拿去当缓存文件名是错的（会让所有大包算出一个相同的假名字）。
+#
+# 打包文件不需要外部 rdc，也**不该**被报"缺缓存"。
+BUNDLED_PACKAGE_GUIDS = frozenset({
+    "807E3D8D-E501-499B-A1D3-22AE3F4E64F3",   # 实测 243/244 个打包文件共用
+    "3A4F7591-0335-46AA-A9A3-918AC4A2596F",   # 实测见到的另一个
+})
+BUNDLED_DIR_NAMES = ("AssetPackages", "EmAssetPackages")
 
 
 class TpacError(Exception):
@@ -257,6 +273,26 @@ def guid_str(raw: bytes) -> str:
     return "%08x-%04x-%04x-%s-%s" % (a, b, c, d[:2].hex(), d[2:].hex())
 
 
+def is_bundled_package(path: str) -> bool:
+    """这个 tpac 是不是"打包文件"（`AssetPackages/` 那种多资源自包含包）。
+
+    判据两条，命中任一即算：
+      * 路径位于某层 `AssetPackages/` 或 `EmAssetPackages/` 目录下
+      * 头部第 8~24 字节落在已知的"打包格式 GUID"白名单里
+
+    为什么要单列这一类：打包文件**不需要** `RuntimeDataCache/<GUID>.rdc`
+    （数据内联在文件里），而且它头部的那个字段是"包格式 GUID"、所有打包文件共用，
+    拿去拼缓存名会算出一个假的、每个大包都一样的文件名，进而误报"缺缓存"。
+
+    白名单只能是已知值，所以**路径判据是主力**；GUID 判据用于兜住
+    "有人把打包文件放在非标准目录"的情况。
+    """
+    parts = [p.lower() for p in path.replace("\\", "/").split("/")]
+    if any(d.lower() in parts for d in BUNDLED_DIR_NAMES):
+        return True
+    return cache_guid_of(path) in BUNDLED_PACKAGE_GUIDS
+
+
 def cache_guid_of(path: str) -> str:
     """该 tpac 对应的运行时缓存 GUID（大写 .NET 文本格式）；读不出返回 ""。
 
@@ -275,9 +311,14 @@ def cache_guid_of(path: str) -> str:
 def cache_file_name(path: str) -> str:
     """该 tpac 对应的运行时缓存文件名，形如 `82F204BF-0A6C-…-326A2D9D65B1.rdc`。
 
+    打包文件（`AssetPackages/`）返回空字符串：它们数据自包含、不需要缓存，
+    头部的格式 GUID 也不是资源 GUID（详见 `is_bundled_package`）。
+
     统一输出"大写 GUID + 小写扩展名"这一种写法：引擎是按文件名查的，早期版本的工具
     曾把扩展名一起大写成 `.rDC`，那种名字引擎找不到。
     """
+    if is_bundled_package(path):
+        return ""
     guid = cache_guid_of(path)
     return guid + CACHE_EXT if guid else ""
 
@@ -285,9 +326,11 @@ def cache_file_name(path: str) -> str:
 def needs_runtime_cache(report: "PackageReport") -> bool:
     """这个包在源模块里**应该**有一份对应的 `.rdc` 吗？
 
-    经验规则（实测 MCV 78 个 + 老 Vaegir 6 个都吻合）：
+    分三种情况：
+      * 打包文件（`AssetPackages/`）→ **不需要**。数据自包含在文件里，官方模块
+        和绝大多数下载来的 mod 都没有 RuntimeDataCache 目录（实测）。
       * 类型只含 `Material`（且解析无错）→ 材质包，**不需要**缓存
-      * 其它情况（几何 / 贴图 / 多类型 / 解析失败）→ 都应有缓存
+      * 其它（几何 / 贴图 / 多类型 / 解析失败）→ **需要**
 
     用 `types` 判断而不是文件名后缀，因为后缀约定不统一（`*_mtl.tpac` /
     `*_material_mtl.tpac` 都见过）；而 `types` 是引擎烘焙时实际写的。
@@ -297,6 +340,8 @@ def needs_runtime_cache(report: "PackageReport") -> bool:
     """
     if not report or getattr(report, "error", ""):
         return True
+    if is_bundled_package(getattr(report, "path", "")):
+        return False
     types = report.types or {}
     if not types:
         return True
@@ -371,6 +416,18 @@ class Segment:
 
     def size(self) -> int:
         return self.storage_size
+
+    def release_data(self) -> None:
+        """丢弃 `get_data()` 解压出来的缓存。
+
+        为什么需要它：`get_data()` 会把结果**永久缓存**在 `self._data` 里。对
+        `core_game.tpac` 这种 2.8 GB / 23109 段的包，如果逐个解压却不释放，
+        等于把整个包解压后全留在内存——实测进程峰值会到 **4.6 GB**。
+        校验只关心"每个段的解压长度对不对"，看完即可丢，不必驻留。
+
+        丢弃是安全的：已改写的段内容在 `_storage` 里，未改写的段随时能从源重读。
+        """
+        self._data = None
 
 
 @dataclass
@@ -686,10 +743,32 @@ def save_tpac(pkg: TpacPackage, path: str, version: Optional[int] = None,
         os.rename(tmp_path, path)
 
 
+def verify_segments(pkg: TpacPackage) -> Tuple[int, str]:
+    """流式校验包内每个 segment：解压长度必须等于声明的 `actual_size`。
+
+    返回 `(检查过的段数, 错误描述)`；错误为空串表示全部通过。
+
+    **为什么单独写一个函数**：`Segment.get_data()` 会把解压结果永久缓存进
+    `seg._data`。写盘后的自检若直接循环调它，等于把整个包解压后全留在内存里——
+    实测 2.8 GB 的 `core_game.tpac`（23109 段）进程峰值因此飙到 **4.6 GB**，
+    而校验本身只是"逐个看一眼长度"，根本不需要同时持有全部段。
+
+    这里每检查完一段就 `release_data()` 丢掉，峰值只跟**单个最大段**有关。
+    """
+    checked = 0
+    for item in pkg.items:
+        for seg in item.segments:
+            data = seg.get_data()
+            if len(data) != seg.actual_size:
+                return checked, tr("mig.err_seg_len", name=item.name)
+            checked += 1
+            seg.release_data()
+    return checked, ""
+
+
 # --------------------------------------------------------------------------
 # 依赖图
 # --------------------------------------------------------------------------
-
 def build_dependency_graph(pkg: TpacPackage) -> None:
     """在 metadata / dependence 表中搜索已知 GUID 字节串，还原依赖图。
 
@@ -964,10 +1043,10 @@ class PackageReport:
     error: str = ""
     # 源模块 RuntimeDataCache/ 里对应的 .rdc（找不到为空；材质包本来就没有）
     cache_path: str = ""
-    # 该包**是否应该**有运行时缓存（材质包 = False）。完整性审计靠这个字段。
+    # 该包**是否应该**有运行时缓存（材质包 / 打包文件 = False）。完整性审计靠这个字段。
     cache_expected: bool = True
-    # 该包**是否应该**有运行时缓存（材质包 = False）。完整性审计靠这个字段。
-    cache_expected: bool = True
+    # 是不是打包文件（`AssetPackages/` 那种）。界面上要显示成"自包含"而不是"缺缓存"。
+    bundled: bool = False
 
     @property
     def cache_size(self) -> int:

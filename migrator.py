@@ -29,8 +29,8 @@ from typing import Callable, Dict, List, Optional, Sequence, Set
 from i18n import LANGS, init_lang, tr
 from tpac_core import (
     CACHE_DIR_NAME, MappingRule, PackageReport, Remapper, ScanOptions, TpacError,
-    build_dependency_graph, cache_file_name, guid_str, load_tpac,
-    needs_runtime_cache, save_tpac, scan_package,
+    build_dependency_graph, cache_file_name, guid_str, is_bundled_package,
+    load_tpac, needs_runtime_cache, save_tpac, scan_package, verify_segments,
 )
 
 JOURNAL_NAME = "_migration_journal.json"
@@ -189,7 +189,11 @@ def cache_target_path(tpac_path: str, target_module_dir: str) -> str:
     name = cache_file_name(tpac_path)
     if not name:
         return ""
-    root = module_root_of(target_module_dir) or target_module_dir
+    # 先按模块根归一化（用户可能把目标填成 .../Modules/X/Assets），
+    # 归一化不动时再退回 module_root_of 的老逻辑。
+    root = module_root_from_target(target_module_dir)
+    if root == os.path.normpath(os.path.abspath(target_module_dir)):
+        root = module_root_of(target_module_dir) or target_module_dir
     return os.path.join(runtime_cache_dir(root), name)
 
 
@@ -217,8 +221,10 @@ def attach_cache_info(report: PackageReport) -> PackageReport:
     """给扫描报告补上"源模块里有没有对应运行时缓存"（就地改并返回）。
 
     放在扫描阶段做：迁移之前就能看出哪些包会把缓存一起带走。
-    同时填上 `cache_expected`（这个包是否应该有缓存），材质包会标 False。
+    同时填上 `cache_expected`（这个包是否应该有缓存；材质包和打包文件都是 False）
+    和 `bundled`（是不是 AssetPackages 那种自包含包，界面要区别显示）。
     """
+    report.bundled = is_bundled_package(report.path)
     report.cache_path = find_runtime_cache(report.path)
     report.cache_expected = needs_runtime_cache(report)
     return report
@@ -386,11 +392,19 @@ def suggest_rules(reports: Sequence[PackageReport], target_module: str) -> List[
 @dataclass
 class MigrateOptions:
     target_module: str = ""
+    # 落点模式（二选一，target_subdir 优先）：
+    #   auto   —— 按源分类镜像：源 `Assets/rome_items/a.tpac` -> 目标 `Assets/rome_items/a.tpac`
+    #   subdir —— 全部塞进指定子目录：目标 `Assets/<target_subdir>/a.tpac`
+    layout: str = "auto"
+    target_subdir: str = ""
     on_conflict: str = "rename"       # overwrite | skip | rename
     backup: bool = True
     keep_relative: bool = True
     verify: bool = True
-    scan_segments: bool = True
+    # 默认**不扫** segment：实测路径字符串 100% 在 metadata 里，扫 segment 一处改写都
+    # 多找不到，却会把每个段的解压结果驻留内存——2.8 GB 的 core_game.tpac 因此从
+    # 44 MB 涨到 4467 MB。需要"万一"时可在界面勾选深度扫描。
+    scan_segments: bool = False
     max_segment_size: int = 4 << 20
 
 
@@ -418,15 +432,82 @@ class MigrateResult:
     cache_entry: Optional[Dict] = None
 
 
+# 目标目录归一化时认可的"资源根"层名。用户把目标目录选到这一层（或更深，
+# 例如 `模块根\Assets\rome_items`）时都要切回它们的父目录当模块根，否则再按
+# 源结构拼接就会得到 `Assets\Assets\rome_items` 这种双层嵌套——实测踩过。
+RESOURCE_ROOT_NAMES = ("assets", "assetpackages", "emassetpackages")
+
+
+def module_root_from_target(target_dir: str) -> str:
+    """把用户可能选得过深的目标目录，归一化成**模块根**。
+
+    规则：**从后往前**找第一个资源根层（Assets / AssetPackages / EmAssetPackages），
+    切到它的父目录；找不到就原样返回。
+
+    从后往前而不是从前往后，是为了避开模块自身路径里含 "assets" 的情况
+    （比如 `D:\\Assets\\proj\\Modules\\MyMod`）——那种路径里 Assets 在前、模块在后，
+    从前往后会误切到盘符。另外切完后剩余路径至少要"盘符 + 一层目录"，
+    否则宁可不动（避免切出一个盘符根）。
+    """
+    norm = os.path.normpath(os.path.abspath(target_dir))
+    parts = norm.split(os.sep)
+    for i in range(len(parts) - 1, 0, -1):
+        if parts[i].lower() in RESOURCE_ROOT_NAMES and len(parts[:i]) >= 2:
+            return os.sep.join(parts[:i])
+    return norm
+
+
+def layout_target_dir(target_module_dir: str, target_subdir: str) -> str:
+    """把「目标模块目录 + 子目录」解析成最终落点**目录**（不含文件名）。
+
+    `target_subdir` 为空（或全是斜杠）时返回空串，表示"没指定"——由
+    `keep_relative` 决定是按源分类镜像还是平铺。非空时返回绝对路径，
+    并处理两件事：
+      * 用户填 `rome_items` 自动补成 `<模块根>/Assets/rome_items`；
+      * 用户直接填 `Assets/rome_items` 或 `AssetPackages` 则不重复加前缀。
+
+    目标目录先经 `module_root_from_target` 归一化，所以用户把目标选到
+    `模块根\\Assets` 也不会拼出 `Assets\\Assets\\rome_items`。
+    """
+    if not target_subdir:
+        return ""
+    sub = target_subdir.strip().strip("/\\").replace("/", os.sep)
+    if not sub:
+        return ""
+    head = sub.split(os.sep)[0].lower()
+    if head not in RESOURCE_ROOT_NAMES:
+        sub = os.path.join("Assets", sub)
+    return os.path.join(module_root_from_target(target_module_dir), sub)
+
+
 def compute_target_path(source: str, target_module_dir: str,
-                        keep_relative: bool) -> str:
+                        keep_relative: bool, target_subdir: str = "") -> str:
+    """算某个源 tpac 的最终落点（绝对路径）。
+
+    三种模式，优先级从高到低：
+      1. `target_subdir` 非空 —— 全部塞进 `<模块根>/Assets/<子目录>/`。
+         用户填 `rome_items` 会补上 `Assets/` 前缀；直接填 `Assets/rome_items`
+         或 `AssetPackages` 也认，不重复加。
+      2. `keep_relative=True` —— 按**源模块内的相对路径**镜像
+         （源 `Assets/rome_items/a.tpac` -> 目标 `Assets/rome_items/a.tpac`）。
+         这是做 mod 的常规用法：保留 rome_items / levant_items 这类分类结构。
+      3. 否则 —— 只取文件名，平铺到模块根。
+
+    `target_module_dir` 会先经 `module_root_from_target` 归一化，所以用户把目标
+    选成 `模块根\\Assets` 也不会拼出双层目录。
+    """
+    root = module_root_from_target(target_module_dir)
+
+    sub_dir = layout_target_dir(target_module_dir, target_subdir)
+    if sub_dir:
+        return os.path.join(sub_dir, os.path.basename(source))
+
     if keep_relative:
-        root = module_root_of(source)
-        if root:
-            return os.path.join(target_module_dir,
-                                os.path.relpath(source, root))
-        return os.path.join(target_module_dir, os.path.basename(source))
-    return os.path.join(target_module_dir, os.path.basename(source))
+        src_root = module_root_of(source)
+        if src_root:
+            return os.path.join(root, os.path.relpath(source, src_root))
+
+    return os.path.join(root, os.path.basename(source))
 
 
 def resolve_conflict(path: str, on_conflict: str) -> str:
@@ -534,18 +615,21 @@ def migrate_one(source: str, target: str, rules: Sequence[MappingRule],
         save_tpac(pkg, target, progress=progress)
 
         if options.verify:
+            # 校验必须**流式**做：逐个段解压、看完即丢。若在这里直接循环调
+            # seg.get_data()，解压结果会被永久缓存，2.8 GB 的包峰值会到 4.6 GB
+            # （实测踩过），而校验本身只需要"看一眼每个段的长度对不对"。
             check = load_tpac(target)
-            result.items_after = len(check.items)
-            for item in check.items:
-                for seg in item.segments:
-                    data = seg.get_data()
-                    if len(data) != seg.actual_size:
-                        raise TpacError(tr("mig.err_seg_len", name=item.name))
-            if result.items_after != result.items_before:
-                result.warnings.append(
-                    tr("mig.err_item_count", before=result.items_before,
-                       after=result.items_after))
-            check.close()
+            try:
+                result.items_after = len(check.items)
+                _checked, err = verify_segments(check)
+                if err:
+                    raise TpacError(err)
+                if result.items_after != result.items_before:
+                    result.warnings.append(
+                        tr("mig.err_item_count", before=result.items_before,
+                           after=result.items_after))
+            finally:
+                check.close()
     except Exception as exc:  # noqa: BLE001
         result.status = "failed"
         result.message = "%s: %s" % (type(exc).__name__, exc)
@@ -605,7 +689,8 @@ def run_batch(sources: Sequence[str], target_module_dir: str,
 
     for index, source in enumerate(sources, 1):
         wanted = compute_target_path(source, target_module_dir,
-                                     options.keep_relative)
+                                     options.keep_relative,
+                                     options.target_subdir)
         target = resolve_conflict(wanted, options.on_conflict)
         if not target:
             results.append(MigrateResult(source, wanted, "skipped",
@@ -718,9 +803,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         choices=["overwrite", "skip", "rename"])
     parser.add_argument("--no-backup", action="store_true")
     parser.add_argument("--flat", action="store_true",
-                        help=tr("cli.flat"))  # 兼容旧写法；现在默认就是直投
+                        help=tr("cli.flat"))  # 关掉镜像（= 文件直投目标目录）
     parser.add_argument("--keep-relative", action="store_true",
-                        help=tr("cli.keep_relative"))
+                        help=tr("cli.keep_relative"))  # 兼容旧命令；现已默认开启
+    parser.add_argument("--subdir", default="", help=tr("cli.subdir"))
+    parser.add_argument("--deep-scan", action="store_true",
+                        help=tr("cli.deep_scan"))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--rollback", action="store_true", help=tr("cli.rollback"))
     parser.add_argument("--lang", default="", choices=list(LANGS),
@@ -772,16 +860,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     options = MigrateOptions(
         target_module=dst_module,
+        target_subdir=args.subdir,
         on_conflict=args.on_conflict,
         backup=not args.no_backup,
-        keep_relative=args.keep_relative,
+        # 默认就按源分类镜像（做 mod 的常规用法）；--flat 才拍平到模块根。
+        keep_relative=not args.flat,
+        scan_segments=args.deep_scan,
     )
 
     if args.dry_run:
         print(tr("cli.dry_header"))
+        # 先把落点规则说清楚，再看逐包路径——否则用户看不出分类是否符合预期。
+        sub_dir = layout_target_dir(target_dir, args.subdir)
+        if sub_dir:
+            print("  " + tr("log.layout_subdir", dst=sub_dir))
+        elif options.keep_relative:
+            print("  " + tr("log.layout_mirror"))
+        else:
+            print("  " + tr("log.layout_flat"))
         for f in files[:20]:
-            print("  %s -> %s" % (f, compute_target_path(f, target_dir,
-                                                         options.keep_relative)))
+            print("  %s -> %s" % (f, compute_target_path(
+                f, target_dir, options.keep_relative, options.target_subdir)))
+            if is_bundled_package(f):
+                print("      " + tr("cli.cache_bundled"))
+                continue
             src_cache = find_runtime_cache(f)
             if src_cache:
                 print("      " + tr("cli.cache_line",

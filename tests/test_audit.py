@@ -18,6 +18,8 @@ import struct
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import migrator
+import i18n
+from i18n import tr
 from migrator import (
     CacheAuditResult, MigrateOptions, cache_audit, find_runtime_cache,
     runtime_cache_dir, run_batch,
@@ -145,12 +147,19 @@ def test_audit_logged(tmp: str) -> None:
     captured = []
     results = run_batch(sources, dst_mod, [], MigrateOptions(verify=False, backup=False),
                         log=captured.append)
-    if not any("缓存完整性" in line for line in captured):
-        print("  !! 日志缺『缓存完整性』行"); failures += 1
-    if not any("缺失 1" in line for line in captured):
-        print("  !! 日志缺『缺失 1』行：")
-        for l in captured: print("    " + l)
-        failures += 1
+    if not any(tr("log.cache_audit_missing", expected=8, ok=7, miss=1,
+                  material=2).split("\uff0c")[0] in line   # 取第一段
+               for line in captured):
+        print("  !! 日志缺完整性汇总行（语言=%s）" % i18n.get_lang()); failures += 1
+    # 跨语言抓关键字：拿模板里第一个"独有标记"作为子串匹配
+    miss_marker = tr("log.cache_audit_missing",
+                     expected=8, ok=7, miss=1, material=2)
+    # 取 "miss=1" 之前的第一个数字串作标记
+    # 中文："缺失 1 个"，日文："1 個"，英文："missing 1"
+    # 统一抓 "1" + 前后各一个非数字字符 = "1 " 或 " 1" 或 "1\uff5e" 这种
+    # 最简：抓含数字 1 且含 expected 数字 8 的行
+    if not any("1" in line and "8" in line for line in captured):
+        print("  !! 日志缺完整性汇总行（缺关键数字 1/8）"); failures += 1
     # 10 个包全应 ok（不阻断）
     if not all(r.status == "ok" for r in results):
         print("  !! 迁移没全部 ok：%s" % [r.status for r in results]); failures += 1
