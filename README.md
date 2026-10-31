@@ -1,5 +1,9 @@
 # Bannerlord TPAC 批量迁移工具
 
+[![release](https://img.shields.io/github/v/release/hukai990124-wq/MB-BannerLord-TpacTransferTool?label=release&color=2f81f7)](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases/latest)
+[![downloads](https://img.shields.io/github/downloads/hukai990124-wq/MB-BannerLord-TpacTransferTool/total?color=2f81f7)](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases)
+[![python](https://img.shields.io/badge/python-3.8%2B-3776ab)](https://www.python.org/downloads/)
+
 [English](README_EN.md) | **中文**
 
 > **直接下载**：[Bannerlord-Tpac-Migrator.exe](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases/latest/download/Bannerlord-Tpac-Migrator.exe) —— 单文件，双击即用，**不需要安装 Python**。此链接**始终指向最新版本**，版本号与改动见[更新说明](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases)。

@@ -1,5 +1,9 @@
 # Bannerlord TPAC 一括移行ツール
 
+[![release](https://img.shields.io/github/v/release/hukai990124-wq/MB-BannerLord-TpacTransferTool?label=release&color=2f81f7)](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases/latest)
+[![downloads](https://img.shields.io/github/downloads/hukai990124-wq/MB-BannerLord-TpacTransferTool/total?color=2f81f7)](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases)
+[![python](https://img.shields.io/badge/python-3.8%2B-3776ab)](https://www.python.org/downloads/)
+
 [English](README_EN.md) | [中文](README.md) | **日本語**
 
 > **ダウンロード**：[Bannerlord-Tpac-Migrator.exe](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases/latest/download/Bannerlord-Tpac-Migrator.exe) —— 単一ファイル、ダブルクリックで起動、**Python のインストールは不要**です。このリンクは**常に最新版**を指します。バージョンと変更点は[更新履歴](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases)をご覧ください。

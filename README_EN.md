@@ -1,5 +1,9 @@
 # MB-BannerLord-TpacTransferTool
 
+[![release](https://img.shields.io/github/v/release/hukai990124-wq/MB-BannerLord-TpacTransferTool?label=release&color=2f81f7)](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases/latest)
+[![downloads](https://img.shields.io/github/downloads/hukai990124-wq/MB-BannerLord-TpacTransferTool/total?color=2f81f7)](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases)
+[![python](https://img.shields.io/badge/python-3.8%2B-3776ab)](https://www.python.org/downloads/)
+
 **English** | [中文](README.md)
 
 > **Download:** [Bannerlord-Tpac-Migrator.exe](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases/latest/download/Bannerlord-Tpac-Migrator.exe) — a single file, double-click to run, **no Python installation required**. This link **always points at the newest release**; see the [changelog](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases) for the current version and what changed.
