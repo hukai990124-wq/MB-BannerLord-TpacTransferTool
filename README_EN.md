@@ -2,7 +2,7 @@
 
 **English** | [中文](README.md)
 
-> **Download:** [Bannerlord-Tpac-Migrator-v1.3.0.exe](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases/download/v1.3.0/Bannerlord-Tpac-Migrator-v1.3.0.exe) — a single file, double-click to run, **no Python installation required**. Current version **v1.3.0** (2026-10-31). [All releases and changelogs](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases)
+> **Download:** [Bannerlord-Tpac-Migrator.exe](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases/latest/download/Bannerlord-Tpac-Migrator.exe) — a single file, double-click to run, **no Python installation required**. This link **always points at the newest release**; see the [changelog](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases) for the current version and what changed.
 
 Batch-migrate `.tpac` asset packages from one *Mount & Blade II: Bannerlord* mod to another,
 **bringing each package's runtime cache along**, and automatically **re-mapping the hard-coded

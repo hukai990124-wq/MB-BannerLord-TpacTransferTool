@@ -2,7 +2,7 @@
 
 [English](README_EN.md) | [中文](README.md) | **日本語**
 
-> **ダウンロード**：[Bannerlord-Tpac-Migrator-v1.3.0.exe](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases/download/v1.3.0/Bannerlord-Tpac-Migrator-v1.3.0.exe) —— 単一ファイル、ダブルクリックで起動、**Python のインストールは不要**です。現在のバージョンは **v1.3.0**（2026-10-31）。[すべてのバージョンと更新履歴](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases)
+> **ダウンロード**：[Bannerlord-Tpac-Migrator.exe](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases/latest/download/Bannerlord-Tpac-Migrator.exe) —— 単一ファイル、ダブルクリックで起動、**Python のインストールは不要**です。このリンクは**常に最新版**を指します。バージョンと変更点は[更新履歴](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases)をご覧ください。
 
 『Mount & Blade II: Bannerlord』mod の `.tpac` アセットパッケージを別の mod へ一括移行し、
 **各パッケージに対応するランタイムキャッシュも一緒に**移行します。
