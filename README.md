@@ -2,6 +2,8 @@
 
 [English](README_EN.md) | **中文**
 
+> **直接下载**：[Bannerlord-Tpac-Migrator-v1.3.0.exe](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases/download/v1.3.0/Bannerlord-Tpac-Migrator-v1.3.0.exe) —— 单文件，双击即用，**不需要安装 Python**。当前版本 **v1.3.0**（2026-10-31）。[全部版本与更新说明](https://github.com/hukai990124-wq/MB-BannerLord-TpacTransferTool/releases)
+
 把《骑马与砍杀 II：霸主》mod 里的 `.tpac` 资源包批量迁移到另一个 mod，
 **同时带上每个包对应的运行时缓存**，并自动重映射包内被锁死的资源路径引用——
 解决"搬过去、游戏里却一片空白而且不报错"的问题。
